@@ -7,6 +7,12 @@ export interface VaultConfig {
   readonly prefix: string;
   /** Names of the slots that hold app data; each is encrypted on its own. */
   readonly slots: readonly string[];
+  /**
+   * `device` (default): the data key is wrapped by the device key, optionally by one password (app lock).
+   * `users`: a key ring — the data key is stored only wrapped per user by his passphrase; nothing opens
+   * without a login (`setupFirstUser`, `loginUser`, `addUser` …).
+   */
+  readonly mode?: 'device' | 'users';
   /** Replaces any of the English default texts. */
   readonly texts?: Partial<VaultTexts>;
 }
@@ -16,6 +22,9 @@ const NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 /** Throws for a prefix or slot name that is not lower-case words joined by hyphens, or for no/duplicate slots. */
 export function validateConfig(config: VaultConfig): void {
   if (!NAME.test(config.prefix)) throw new Error(`Invalid vault prefix: "${config.prefix}"`);
+  if (config.mode !== undefined && config.mode !== 'device' && config.mode !== 'users') {
+    throw new Error(`Invalid vault mode: "${String(config.mode)}"`);
+  }
   if (config.slots.length === 0) throw new Error('A vault needs at least one slot');
   const seen = new Set<string>();
   for (const slot of config.slots) {

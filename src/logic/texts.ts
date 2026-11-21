@@ -20,6 +20,14 @@ export interface VaultTexts {
   startAnewConfirmError: string;
   dismissErrors: string;
 
+  // Users mode (key ring): the gate
+  userLabel: string;
+  setupTitle: string;
+  setupInfo: string;
+  setupButton: string;
+  loginButton: string;
+  wrongLogin: string;
+
   // Lock settings
   lockTitle: string;
   lockOnInfo: (minutes: number) => string;
@@ -52,6 +60,15 @@ export interface VaultTexts {
   indexedDbUnavailable: string;
   vaultUnreachable: string;
   vaultNotStored: string;
+  notUsersMode: string;
+  notDeviceMode: string;
+  alreadySetUp: string;
+  invalidUser: string;
+  userExists: string;
+  unknownUser: string;
+  cannotRemoveSelf: string;
+  lastUser: string;
+  entryUnreadable: string;
 }
 
 export const DEFAULT_TEXTS: VaultTexts = {
@@ -74,6 +91,15 @@ export const DEFAULT_TEXTS: VaultTexts = {
     'device up again.',
   startAnewConfirmError: 'Discard the data on this device for good and set it up again?',
   dismissErrors: 'Read',
+
+  userLabel: 'User',
+  setupTitle: 'Set up',
+  setupInfo:
+    'The data on this device is encrypted. Choose the first user and a passphrase; without a passphrase ' +
+    'it cannot be opened.',
+  setupButton: 'Set up',
+  loginButton: 'Log in',
+  wrongLogin: 'Wrong user or passphrase.',
 
   lockTitle: 'App lock',
   lockOnInfo: (minutes) =>
@@ -110,6 +136,15 @@ export const DEFAULT_TEXTS: VaultTexts = {
   indexedDbUnavailable: 'IndexedDB is not available',
   vaultUnreachable: 'Vault not reachable',
   vaultNotStored: 'Vault: not stored',
+  notUsersMode: 'This vault has no users (it is not in users mode).',
+  notDeviceMode: 'This vault is in users mode: there is no device lock to change.',
+  alreadySetUp: 'The key ring is already set up.',
+  invalidUser: 'The user name is not valid (1 to 64 characters, no control characters).',
+  userExists: 'There is a user with this name already.',
+  unknownUser: 'There is no such user.',
+  cannotRemoveSelf: 'You cannot remove yourself.',
+  lastUser: 'The last user cannot be removed.',
+  entryUnreadable: 'The key entry cannot be read.',
 };
 
 export function resolveTexts(texts?: Partial<VaultTexts>): VaultTexts {

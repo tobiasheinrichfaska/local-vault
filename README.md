@@ -55,6 +55,30 @@ Names: lower case, digits and `. _ : / -`, up to 200 characters (`isBlobName`). 
 blobs on their way too; "start anew" removes them with the slots. An existing version 1 database is
 upgraded in place (the key bundle and the device key stay).
 
+### Users mode (several people on one device)
+
+`createVault({ prefix, slots, mode: 'users' })` swaps the device lock for a **key ring**: the data key is
+stored only wrapped by a key from each user's passphrase (PBKDF2, 600 000 rounds), one entry per user.
+Nothing opens without a login; the device key plays no part. The gate shows a set-up (first user) and a
+login (user + passphrase); `LockSettings` renders nothing in this mode.
+
+```ts
+await vault.startVault(); // { kind: 'setup' } | { kind: 'locked' } | { kind: 'error', … }
+await vault.setupFirstUser('anna', 'a long passphrase');
+await vault.loginUser('anna', 'a long passphrase'); // StartResult | false
+await vault.addUser('bernd', 'his passphrase', { user: 'anna', passphrase: 'a long passphrase' });
+await vault.removeUser('bernd'); // never yourself
+await vault.changeUserPassphrase('anna', 'old', 'new');
+vault.users(); // known also while locked
+```
+
+Adding a user needs the logged-in user's passphrase once more (the data key stays non-extractable in
+use). For an app that keeps a user's entry on a **server** (so a wiped or new device can fill itself
+again): `vault.userEntry('anna')` is the entry as text (the server cannot unwrap it without the
+passphrase) and a fresh device takes it back with `vault.joinWithEntry(text, passphrase)`. The login
+secret the server checks must be derived apart from this key (the app's part). A stored bundle that
+cannot be read (or is of the other mode) is never replaced except by "start anew".
+
 Texts in another language: `createVault({ prefix, slots, texts: { opening: '…', ... } })` or the
 `texts` prop of the components; every field of `VaultTexts` has an English default
 (`DEFAULT_TEXTS`). For tests use `createVault(config, memoryEnvironment())`.

@@ -3,13 +3,15 @@
 // app's prefix is ever touched.
 import { databaseName, hasPrefix } from '../logic/config.ts';
 import { DEFAULT_TEXTS, type VaultTexts } from '../logic/texts.ts';
-import { createDeviceKey, type Bundle, type Piece } from '../logic/vault.ts';
+import { createDeviceKey, type Bundle, type Piece, type UsersBundle } from '../logic/vault.ts';
 
 export interface VaultEnvironment {
   /** The device key, made and stored on first use (one key even for two callers at once). */
   deviceKey(): Promise<CryptoKey>;
   readBundle(): Promise<unknown>;
-  writeBundle(bundle: Bundle): Promise<void>;
+  writeBundle(bundle: Bundle | UsersBundle): Promise<void>;
+  /** Removes the key bundle (users mode: start anew goes back to the set-up). */
+  clearBundle(): Promise<void>;
   /** `name` is the full store name (`<prefix>-<slot>`). */
   read(name: string): string | null;
   /** Throws when the browser does not store it (full, forbidden). */
@@ -108,6 +110,9 @@ export function browserEnvironment(
     async writeBundle(bundle) {
       await idb('readwrite', (store) => store.put(bundle, 'bundle'));
     },
+    async clearBundle() {
+      await idb('readwrite', (store) => store.delete('bundle'));
+    },
     read: (name) => localStorage.getItem(name),
     write: (name, value) => localStorage.setItem(name, value),
     remove: (name) => localStorage.removeItem(name),
@@ -170,6 +175,7 @@ export function memoryEnvironment(): VaultEnvironment & {
     deviceKey: () => (key ??= createDeviceKey()),
     readBundle: async () => storedBundle,
     writeBundle: async (b) => void (storedBundle = b),
+    clearBundle: async () => void (storedBundle = undefined),
     read: (s) => raw.get(s) ?? null,
     write: (s, v) => void raw.set(s, v),
     remove: (s) => void raw.delete(s),
@@ -193,6 +199,7 @@ export function guardEnvironment(prefix: string, env: VaultEnvironment): VaultEn
     deviceKey: () => env.deviceKey(),
     readBundle: () => env.readBundle(),
     writeBundle: (bundle) => env.writeBundle(bundle),
+    clearBundle: () => env.clearBundle(),
     read: (name) => env.read(check(name)),
     write: (name, value) => env.write(check(name), value),
     remove: (name) => env.remove(check(name)),
