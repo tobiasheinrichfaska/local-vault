@@ -17,6 +17,7 @@ export { LockSettings, type LockSettingsProps } from './ui/LockSettings.tsx';
 export {
   databaseName,
   hasPrefix,
+  isBlobName,
   storageName,
   validateConfig,
   type VaultConfig,

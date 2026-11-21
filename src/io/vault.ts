@@ -2,16 +2,18 @@
 // the opened slots, and writes every change encrypted. A slot that cannot be opened (other key,
 // damaged — or plain: no way back to unencrypted) is never overwritten: writing to it is refused
 // and the reason shown. Each `createVault` call has its own state.
-import { storageName, validateConfig, type VaultConfig } from '../logic/config.ts';
+import { isBlobName, storageName, validateConfig, type VaultConfig } from '../logic/config.ts';
 import { resolveTexts, type VaultTexts } from '../logic/texts.ts';
 import {
   bundleWithLock,
   bundleWithoutLock,
   createDataKey,
   isSealed,
+  open as openPiece,
   openBundle,
   openText,
   parseBundle,
+  seal as sealPiece,
   sealText,
   type Bundle,
 } from '../logic/vault.ts';
@@ -48,7 +50,20 @@ export interface Vault {
    * be opened), otherwise undefined.
    */
   writeSlot(slot: string, value: string): string | undefined;
-  /** Resolves when everything written so far is stored. */
+  // Blobs: encrypted bytes under free names (lower case, digits and `. _ : / -`, up to 200
+  // characters) in IndexedDB, for what is too large or too many for slots (documents, blocks of a
+  // big state). Each blob is bound to its name, so none can be swapped for another. Unlike slots
+  // they are not held in memory: every call goes to the storage. They stay apart from the slots
+  // (a slot name has no `:`), and "start anew" removes them with the slots. All of them throw
+  // while the vault is closed.
+  /** Stores the bytes encrypted; resolves when stored, rejects when the browser does not store them. */
+  putBytes(name: string, bytes: Uint8Array): Promise<void>;
+  /** The bytes, undefined when there is no such blob; throws for one that cannot be opened. */
+  getBytes(name: string): Promise<Uint8Array | undefined>;
+  removeBytes(name: string): Promise<void>;
+  /** Names of all blobs, sorted; with `startsWith` only those beginning so. */
+  listBytes(startsWith?: string): Promise<string[]>;
+  /** Resolves when everything written so far (slots and blobs) is stored. */
   saved(): Promise<void>;
   /** Every storage error after the fact (writing is asynchronous); returns the unsubscribe function. */
   onError(listener: (error: string) => void): () => void;
@@ -88,6 +103,7 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
   let opened: Opened | undefined;
   const waiting = new Map<string, string>(); // by slot
   let running: Promise<void> | undefined;
+  const writing = new Set<Promise<void>>(); // blobs on their way
   const listeners = new Set<(error: string) => void>();
 
   const report = (error: string) => {
@@ -159,7 +175,30 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
     return undefined;
   }
 
-  const saved = () => running ?? Promise.resolve();
+  const blobName = (name: string) => {
+    if (!isBlobName(name)) throw new Error(`Invalid blob name: "${name}"`);
+    return name;
+  };
+  // the piece is bound to this name (never to a slot's: a slot name has no colon)
+  const blobSlot = (name: string) => `blob:${blobName(name)}`;
+
+  async function track(write: Promise<void>): Promise<void> {
+    const tracked = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    writing.add(tracked);
+    try {
+      await write;
+    } finally {
+      writing.delete(tracked);
+    }
+  }
+
+  const saved = async () => {
+    await (running ?? Promise.resolve());
+    await Promise.all([...writing]);
+  };
 
   return {
     config,
@@ -219,6 +258,41 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
 
     saved,
 
+    async putBytes(name, bytes) {
+      const slot = blobSlot(name);
+      const o = requireOpen();
+      await track(
+        (async () => {
+          try {
+            await environment.writeBlob(name, await sealPiece(prefix, o.data, slot, bytes));
+          } catch (error) {
+            throw new Error(texts.notSaved(message(error)));
+          }
+        })(),
+      );
+    },
+
+    async getBytes(name) {
+      const slot = blobSlot(name);
+      const o = requireOpen();
+      const piece = await environment.readBlob(name);
+      if (!piece) return undefined;
+      const plain = await openPiece(prefix, o.data, slot, piece);
+      if (!plain) throw new Error(texts.slotUnreadable);
+      return plain;
+    },
+
+    async removeBytes(name) {
+      blobName(name);
+      requireOpen();
+      await track(environment.removeBlob(name));
+    },
+
+    async listBytes(startsWith = '') {
+      requireOpen();
+      return (await environment.listBlobs()).filter((n) => n.startsWith(startsWith));
+    },
+
     onError(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -231,6 +305,8 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
     async startAnew() {
       const d = device ?? (await environment.deviceKey());
       for (const slot of config.slots) environment.remove(name(slot));
+      await Promise.all([...writing]);
+      await environment.clearBlobs();
       const fresh = await bundleWithoutLock(prefix, d, await createDataKey());
       await environment.writeBundle(fresh);
       waiting.clear();

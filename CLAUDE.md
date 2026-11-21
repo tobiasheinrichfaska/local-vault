@@ -35,7 +35,7 @@ data and no app words. Public entry: `src/index.ts`.
 - Every rule keeps its test: a plain value in a slot is not read; an unreadable slot is never
   overwritten; a closed vault throws on read/write; write errors reach `onError`; lock on/off/new
   password leave the data untouched; wrong password refused; the 5-minute re-lock rule; the device
-  key is non-extractable; "start anew" leaves empty data under a new key.
+  key is non-extractable; "start anew" leaves empty data under a new key (blobs removed); a blob is bound to its name and to the data key; a failed blob write rejects, never silently.
 
 ---
 
@@ -51,8 +51,8 @@ data and no app words. Public entry: `src/index.ts`.
 | `src/index.ts` | Public entry: `createVault`, environments, components, config, texts, crypto pieces |
 | `src/logic/vault.ts`, `base64url.ts` | Crypto pieces: keys, sealed text, bundles, password check, re-lock rule (prefix is the first argument) |
 | `src/logic/config.ts`, `texts.ts` | `VaultConfig` + validation + store names; `VaultTexts` + English `DEFAULT_TEXTS` |
-| `src/io/vault.ts` | `createVault(config, env?)`: the vault instance (`Vault`) |
-| `src/io/environment.ts` | `VaultEnvironment`, `browserEnvironment(prefix)`, `memoryEnvironment()`, `guardEnvironment` |
+| `src/io/vault.ts` | `createVault(config, env?)`: the vault instance (`Vault`): slots (text, in memory) and blobs (`putBytes`/`getBytes`/`removeBytes`/`listBytes`, bytes in IndexedDB) |
+| `src/io/environment.ts` | `VaultEnvironment` (slots in localStorage; keys and blobs in IndexedDB `<prefix>-vault`, version 2), `browserEnvironment(prefix)`, `memoryEnvironment()`, `guardEnvironment` |
 | `src/ui/VaultGate.tsx`, `LockSettings.tsx`, `parts.tsx` | The gate, the lock settings card, shared pieces |
 | `tests/logic/`, `tests/io/`, `tests/ui/` | Unit tests (crypto, vault rules, config/prefix, two instances), `renderToString` smoke tests, coupling guard (no app words, no foreign imports) |
 | `scripts/fix-declarations.mjs` | Rewrites `.ts`/`.tsx` imports in the emitted `.d.ts` files |
@@ -67,14 +67,17 @@ data and no app words. Public entry: `src/index.ts`.
 
 No persisted data of its own beyond what the app puts into its slots; the stored shapes are the
 sealed text `{"m":"<prefix>-vault:1","iv":…,"ct":…}` and the key bundle (`Bundle` in
-`src/logic/vault.ts`, in IndexedDB). No factory defaults.
+`src/logic/vault.ts`, in IndexedDB store `vault`). Blobs: `{iv, ct}` (Uint8Array, structured clone) in the
+IndexedDB store `blobs`, each bound to `blob:<name>` as additional data (a slot name has no colon, so
+none collides). IndexedDB version 2 added `blobs`; version 1 databases are upgraded in place. No factory
+defaults.
 
 ## Tests
 
 ```bash
 npm install
 npm run typecheck
-npm test            # 50 tests on 2026-11-21 (logic 14, io 27, ui 9)
+npm test            # 67 tests on 2026-11-21 (logic 14, io 44, ui 9); io includes fake-indexeddb
 npm run format:check
 npm run build
 ```
@@ -87,10 +90,15 @@ npm run build
   without use (data and key are then gone together; "start anew" or a new install), the real PBKDF2
   time on a phone (about a second), the `visibilitychange` re-lock, and the `confirm()` and reload
   behaviour of "start anew". Each consuming app repeats the device tests.
+- **Blobs (2026-11-21):** tested against `fake-indexeddb` and in memory, not in a real browser (quota
+  errors on iOS Safari, the upgrade with a second tab still open on version 1, large writes on a phone).
+  They are not held in memory and have no overwrite guard: a blob under an unopenable piece is replaced
+  by a `putBytes` of the same name (the app owns its names). Slots still live in localStorage (about 5 MB
+  and synchronous): large state belongs in blobs.
 - **Not consumed by any app from a Git tag yet**; not published to npm; no tag.
 - The prefix is part of the encrypted data: changing it makes old data unreadable.
 - The re-lock after 5 minutes (`LOCK_AFTER_MINUTES`) is fixed, not configurable.
 - Forgotten password: no recovery; "start anew" discards the device's data.
 - The coupling guard forbids app words in `src/`.
 
-*Last updated: 2026-11-21*
+*Last updated: 2026-11-21 — blobs in IndexedDB*

@@ -40,6 +40,21 @@ vault.onError((message) => showToast(message)); // storage errors after the fact
 <LockSettings vault={vault} />;
 ```
 
+Big or many pieces (documents, the blocks of a large state) do not belong in slots: a slot is one
+text in localStorage, held in memory. **Blobs** are encrypted bytes under free names in IndexedDB, bound
+to their name, each call going to the storage:
+
+```ts
+await vault.putBytes('file:ab12', bytes); // resolves when stored, rejects with the reason
+const back = await vault.getBytes('file:ab12'); // Uint8Array | undefined; throws if it cannot be opened
+await vault.listBytes('file:'); // sorted names, optionally those starting so
+await vault.removeBytes('file:ab12');
+```
+
+Names: lower case, digits and `. _ : / -`, up to 200 characters (`isBlobName`). `saved()` waits for
+blobs on their way too; "start anew" removes them with the slots. An existing version 1 database is
+upgraded in place (the key bundle and the device key stay).
+
 Texts in another language: `createVault({ prefix, slots, texts: { opening: '…', ... } })` or the
 `texts` prop of the components; every field of `VaultTexts` has an English default
 (`DEFAULT_TEXTS`). For tests use `createVault(config, memoryEnvironment())`.
