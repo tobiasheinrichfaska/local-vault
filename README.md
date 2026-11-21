@@ -1,0 +1,67 @@
+# local-vault
+
+Encrypted local storage for web apps: everything the device stores is AES-GCM encrypted under a
+random data key; the data key is wrapped by a non-extractable device key (kept in IndexedDB) and,
+if the user turns the app lock on, also by a key from a password (PBKDF2). A React gate opens the
+vault before the app shows anything and locks again after a few minutes in the background. The
+package holds no app data and no app texts: the app passes a name prefix, its slots and, if it
+wants another language, its texts.
+
+**Status:** early (0.1.0), not published to npm. Web only (IndexedDB, localStorage, Web Crypto).
+
+## Install and test
+
+```bash
+npm install
+npm test
+npm run typecheck
+```
+
+## Usage
+
+```tsx
+import { createVault, VaultGate, LockSettings } from 'local-vault';
+
+// One vault per app. Every store name starts with the prefix: `app-vault` (IndexedDB),
+// `app-data` (localStorage, encrypted).
+export const vault = createVault({ prefix: 'app', slots: ['data'] });
+
+// Before the app shows anything:
+<VaultGate vault={vault}>
+  <App />
+</VaultGate>;
+
+// Inside the open vault:
+vault.writeSlot('data', JSON.stringify(state)); // in memory at once, encrypted write follows
+const raw = vault.readSlot('data'); // string | null; throws while closed or unreadable
+vault.onError((message) => showToast(message)); // storage errors after the fact
+
+// An optional settings card for the app lock:
+<LockSettings vault={vault} />;
+```
+
+Texts in another language: `createVault({ prefix, slots, texts: { opening: '…', ... } })` or the
+`texts` prop of the components; every field of `VaultTexts` has an English default
+(`DEFAULT_TEXTS`). For tests use `createVault(config, memoryEnvironment())`.
+
+Rules the vault keeps: a plain value in a slot is never read; an unreadable slot is never
+overwritten; reading or writing while closed throws; turning the lock on/off or a new password
+only wraps the data key anew. Names of the original API and their equivalents:
+[docs/api-mapping.md](docs/api-mapping.md). What only a device can check: see `manual_tests/`.
+
+Bug reports and ideas: [GitHub Issues](https://github.com/tobiasheinrichfaska/local-vault/issues).
+
+## License
+
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
+This project is licensed under the **GNU Affero General Public License v3.0** (AGPLv3).
+You are free to use, modify, and distribute this software under the terms of the AGPLv3.
+If you use this software to provide a network service, you must make the full source code
+of your modifications available to users of that service.
+
+**Commercial License:** If you wish to use this software in a closed-source or proprietary
+product, a commercial license is available. Contact: tobias.a.w.heinrich@gmail.com
+
+See [LICENSE](LICENSE) for the full AGPLv3 text.
+See [LICENSE_COMMERCIAL.md](LICENSE_COMMERCIAL.md) for commercial licensing terms.
