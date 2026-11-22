@@ -278,6 +278,143 @@ export function checkPassword(
   return undefined;
 }
 
+// ---------------------------------------------------------------- users mode (key ring)
+//
+// An alternative to the device lock for apps with several people on one device: the data key is stored
+// only wrapped by a key from each user's passphrase (PBKDF2), one entry per user. Without a login nothing
+// can be opened; the device key plays no part. An entry is the user's key in the app and — as text — what
+// an app may keep for him on a server (it cannot unwrap it without the passphrase).
+
+const usersMarker = (prefix: string) => `${prefix}-vault-users:1`;
+
+export interface UserEntry {
+  readonly user: string;
+  readonly rounds: number;
+  readonly salt: string;
+  readonly iv: string;
+  readonly ct: string;
+}
+export interface UsersBundle {
+  readonly m: string;
+  readonly kind: 'users';
+  readonly entries: readonly UserEntry[];
+}
+
+export const isUserName = (v: unknown): v is string =>
+  typeof v === 'string' &&
+  v !== '' &&
+  [...v].length <= 64 &&
+  !/[\u0000-\u001f\u007f]/.test(v) &&
+  v === v.trim();
+
+const gcmUser = (prefix: string, user: string, iv: Uint8Array) => ({
+  name: 'AES-GCM',
+  iv: new Uint8Array(iv),
+  additionalData: utf8(`${usersMarker(prefix)}|${user}`),
+});
+
+/** Wraps the (extractable) data key for one user. */
+export async function createUserEntry(
+  prefix: string,
+  user: string,
+  passphrase: string,
+  data: CryptoKey,
+  rounds = ROUNDS,
+): Promise<UserEntry> {
+  if (!isUserName(user)) throw new RangeError('Invalid user name');
+  const salt = random(16);
+  const iv = random(12);
+  const ct = new Uint8Array(
+    await crypto.subtle.wrapKey(
+      'raw',
+      data,
+      await passwordKey(passphrase, salt, rounds),
+      gcmUser(prefix, user, iv),
+    ),
+  );
+  return { user, rounds, salt: base64url(salt), iv: base64url(iv), ct: base64url(ct) };
+}
+
+/**
+ * The data key of an entry; undefined for a wrong passphrase. `extractable` only to wrap it for another
+ * user — in use it stays non-extractable.
+ */
+export async function openUserEntry(
+  prefix: string,
+  entry: UserEntry,
+  passphrase: string,
+  extractable = false,
+): Promise<CryptoKey | undefined> {
+  try {
+    return await crypto.subtle.unwrapKey(
+      'raw',
+      new Uint8Array(fromBase64url(entry.ct)),
+      await passwordKey(passphrase, fromBase64url(entry.salt), entry.rounds),
+      gcmUser(prefix, entry.user, fromBase64url(entry.iv)),
+      AES,
+      extractable,
+      ['encrypt', 'decrypt'],
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function entryFrom(raw: unknown): UserEntry | undefined {
+  if (!isObject(raw)) return undefined;
+  const { user, rounds, salt, iv, ct } = raw;
+  return isUserName(user) &&
+    typeof rounds === 'number' &&
+    Number.isInteger(rounds) &&
+    rounds >= 1000 &&
+    rounds <= 10_000_000 &&
+    isB64(salt, 22) &&
+    isB64(iv, 16) &&
+    isB64(ct, 22)
+    ? { user, rounds, salt, iv, ct }
+    : undefined;
+}
+
+/** The stored key ring, strictly; undefined for anything else (also duplicate users, no entry at all). */
+export function parseUsersBundle(prefix: string, raw: unknown): UsersBundle | undefined {
+  if (
+    !isObject(raw) ||
+    raw.m !== usersMarker(prefix) ||
+    raw.kind !== 'users' ||
+    !Array.isArray(raw.entries)
+  ) {
+    return undefined;
+  }
+  const entries: UserEntry[] = [];
+  for (const e of raw.entries) {
+    const entry = entryFrom(e);
+    if (!entry || entries.some((x) => x.user === entry.user)) return undefined;
+    entries.push(entry);
+  }
+  return entries.length > 0 ? { m: usersMarker(prefix), kind: 'users', entries } : undefined;
+}
+
+export const usersBundle = (prefix: string, entries: readonly UserEntry[]): UsersBundle => ({
+  m: usersMarker(prefix),
+  kind: 'users',
+  entries,
+});
+
+/** An entry as text (JSON), for an app that keeps it on a server. */
+export const userEntryToText = (prefix: string, e: UserEntry): string =>
+  JSON.stringify({ m: usersMarker(prefix), ...e });
+
+/** Strict: anything but exactly an entry as `userEntryToText` made it gives undefined. */
+export function userEntryFromText(prefix: string, text: string): UserEntry | undefined {
+  try {
+    const raw: unknown = JSON.parse(text);
+    if (!isObject(raw) || raw.m !== usersMarker(prefix)) return undefined;
+    return entryFrom(raw);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Minutes in the background after which the app locks again (with the lock on). */
 export const LOCK_AFTER_MINUTES = 5;
 

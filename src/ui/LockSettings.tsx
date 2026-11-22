@@ -11,7 +11,12 @@ export interface LockSettingsProps {
   readonly texts?: Partial<VaultTexts>;
 }
 
-export function LockSettings({ vault, texts: override }: LockSettingsProps) {
+/** The app lock of the device mode; in users mode the lock is the login, so there is nothing to set. */
+export function LockSettings(props: LockSettingsProps) {
+  return props.vault.config.mode === 'users' ? null : <DeviceLockSettings {...props} />;
+}
+
+function DeviceLockSettings({ vault, texts: override }: LockSettingsProps) {
   const texts = override ? { ...vault.texts, ...override } : vault.texts;
   const [, refresh] = useState(0);
   const [current, setCurrent] = useState('');

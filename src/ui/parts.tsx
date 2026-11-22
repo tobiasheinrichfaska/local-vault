@@ -57,3 +57,31 @@ export function PasswordField({
     </label>
   );
 }
+
+export function TextField({
+  label,
+  value,
+  onChange,
+  autoComplete,
+  autoFocus,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  autoComplete: 'username';
+  autoFocus?: boolean;
+}) {
+  return (
+    <label style={{ display: 'block', margin: '6px 0' }}>
+      {label}
+      <input
+        type="text"
+        autoComplete={autoComplete}
+        autoFocus={autoFocus === true}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={ui.input}
+      />
+    </label>
+  );
+}

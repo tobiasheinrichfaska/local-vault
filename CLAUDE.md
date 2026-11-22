@@ -49,9 +49,9 @@ data and no app words. Public entry: `src/index.ts`.
 | `docs/api-mapping.md` | Every exported name: old name → new name → file (for migrating apps) |
 | `manual_tests/` | Human-tester instructions (README only so far) |
 | `src/index.ts` | Public entry: `createVault`, environments, components, config, texts, crypto pieces |
-| `src/logic/vault.ts`, `base64url.ts` | Crypto pieces: keys, sealed text, bundles, password check, re-lock rule (prefix is the first argument) |
+| `src/logic/vault.ts`, `base64url.ts` | Crypto pieces: keys, sealed text, bundles, password check, re-lock rule (prefix is the first argument); users mode: `createUserEntry`, `openUserEntry`, `parseUsersBundle`, `userEntryToText`/`FromText` |
 | `src/logic/config.ts`, `texts.ts` | `VaultConfig` + validation + store names; `VaultTexts` + English `DEFAULT_TEXTS` |
-| `src/io/vault.ts` | `createVault(config, env?)`: the vault instance (`Vault`): slots (text, in memory) and blobs (`putBytes`/`getBytes`/`removeBytes`/`listBytes`, bytes in IndexedDB) |
+| `src/io/vault.ts` | `createVault(config, env?)`: the vault instance (`Vault`): slots (text, in memory) and blobs (`putBytes`/`getBytes`/`removeBytes`/`listBytes`, bytes in IndexedDB); `mode: 'users'` = key ring per user (`setupFirstUser`, `loginUser`, `addUser`, `removeUser`, `changeUserPassphrase`, `userEntry`, `joinWithEntry`) |
 | `src/io/environment.ts` | `VaultEnvironment` (slots in localStorage; keys and blobs in IndexedDB `<prefix>-vault`, version 2), `browserEnvironment(prefix)`, `memoryEnvironment()`, `guardEnvironment` |
 | `src/ui/VaultGate.tsx`, `LockSettings.tsx`, `parts.tsx` | The gate, the lock settings card, shared pieces |
 | `tests/logic/`, `tests/io/`, `tests/ui/` | Unit tests (crypto, vault rules, config/prefix, two instances), `renderToString` smoke tests, coupling guard (no app words, no foreign imports) |
@@ -66,7 +66,7 @@ data and no app words. Public entry: `src/index.ts`.
 ## Data Model
 
 No persisted data of its own beyond what the app puts into its slots; the stored shapes are the
-sealed text `{"m":"<prefix>-vault:1","iv":…,"ct":…}` and the key bundle (`Bundle` in
+sealed text `{"m":"<prefix>-vault:1","iv":…,"ct":…}`, the key ring of users mode (`{"m":"<prefix>-vault-users:1","kind":"users","entries":[{user,rounds,salt,iv,ct}]}`, the user name is authenticated data of his entry) and the key bundle (`Bundle` in
 `src/logic/vault.ts`, in IndexedDB store `vault`). Blobs: `{iv, ct}` (Uint8Array, structured clone) in the
 IndexedDB store `blobs`, each bound to `blob:<name>` as additional data (a slot name has no colon, so
 none collides). IndexedDB version 2 added `blobs`; version 1 databases are upgraded in place. No factory
@@ -77,7 +77,7 @@ defaults.
 ```bash
 npm install
 npm run typecheck
-npm test            # 67 tests on 2026-11-21 (logic 14, io 44, ui 9); io includes fake-indexeddb
+npm test            # 77 tests on 2026-11-21 (logic 14, io 53, ui 10); io includes fake-indexeddb
 npm run format:check
 npm run build
 ```
@@ -95,10 +95,15 @@ npm run build
   They are not held in memory and have no overwrite guard: a blob under an unopenable piece is replaced
   by a `putBytes` of the same name (the app owns its names). Slots still live in localStorage (about 5 MB
   and synchronous): large state belongs in blobs.
+- **Users mode (2026-11-21):** tested in memory only; adding or changing a user unwraps the data key as
+  extractable for a moment (the logged-in user's passphrase is asked again); the passphrase rules are the
+  app's (the package only refuses under 6 characters); no limit of failed logins (the app or a server
+  does that); an entry swapped to another user name does not open (the name is authenticated data).
+- **Removing a user does not rotate the data key (2026-11-22):** `removeUser` only drops his entry from the ring; the data key stays the same, so a copy of his entry (for example one kept on a server) still opens the data with his passphrase. Treat a removed user as having had access, or "start anew".
 - **Not consumed by any app from a Git tag yet**; not published to npm; no tag.
 - The prefix is part of the encrypted data: changing it makes old data unreadable.
 - The re-lock after 5 minutes (`LOCK_AFTER_MINUTES`) is fixed, not configurable.
 - Forgotten password: no recovery; "start anew" discards the device's data.
 - The coupling guard forbids app words in `src/`.
 
-*Last updated: 2026-11-21 — blobs in IndexedDB*
+*Last updated: 2026-11-21 — users mode (key ring)*
