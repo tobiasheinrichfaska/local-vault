@@ -1,6 +1,7 @@
 // The app's configuration of its vault: the name prefix and the slots. Every storage name the
 // package uses (localStorage key, IndexedDB database, stored markers) starts with `<prefix>-`.
 import type { VaultTexts } from './texts.ts';
+import { checkRounds } from './vault.ts';
 
 export interface VaultConfig {
   /** Prefix of every browser store name, e.g. `app` gives `app-vault` and `app-<slot>`. */
@@ -13,6 +14,11 @@ export interface VaultConfig {
    * without a login (`setupFirstUser`, `loginUser`, `addUser` …).
    */
   readonly mode?: 'device' | 'users';
+  /**
+   * Lowest PBKDF2 round count taken for a password, an entry or a lock, written or read (default
+   * `DEFAULT_MIN_ROUNDS`, 100 000). Lower it only for tests; production leaves it out.
+   */
+  readonly minRounds?: number;
   /** Replaces any of the English default texts. */
   readonly texts?: Partial<VaultTexts>;
 }
@@ -24,6 +30,9 @@ export function validateConfig(config: VaultConfig): void {
   if (!NAME.test(config.prefix)) throw new Error(`Invalid vault prefix: "${config.prefix}"`);
   if (config.mode !== undefined && config.mode !== 'device' && config.mode !== 'users') {
     throw new Error(`Invalid vault mode: "${String(config.mode)}"`);
+  }
+  if (config.minRounds !== undefined && !checkRounds(config.minRounds, 1)) {
+    throw new Error(`Invalid minRounds: "${String(config.minRounds)}"`);
   }
   if (config.slots.length === 0) throw new Error('A vault needs at least one slot');
   const seen = new Set<string>();

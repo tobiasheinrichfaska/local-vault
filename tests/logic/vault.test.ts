@@ -21,6 +21,7 @@ const defined = <T>(x: T | undefined): T => {
 };
 
 const P = 'app';
+const MIN = 1000; // the lowest count tests allow (the default is 100 000)
 const ROUNDS_FAST = 1000; // fast in tests; real use is ROUNDS (600 000)
 
 describe('base64url', () => {
@@ -76,7 +77,7 @@ describe('the data key and its bundle', () => {
     const data = await createDataKey();
     const raw = await sealText(P, data, 'p', 'secret');
     const bundle = await bundleWithoutLock(P, device, data);
-    expect(parseBundle(P, JSON.parse(JSON.stringify(bundle)))).toEqual(bundle);
+    expect(parseBundle(P, JSON.parse(JSON.stringify(bundle)), MIN)).toEqual(bundle);
     const opened = await openBundle(P, device, bundle);
     expect(opened).toBeDefined();
     expect(await openText(P, defined(opened), 'p', raw)).toBe('secret');
@@ -95,8 +96,8 @@ describe('the data key and its bundle', () => {
     const device = await createDeviceKey();
     const data = await createDataKey();
     const raw = await sealText(P, data, 'p', 'secret');
-    const bundle = await bundleWithLock(P, device, data, 'Secret-2026', ROUNDS_FAST);
-    expect(parseBundle(P, JSON.parse(JSON.stringify(bundle)))).toEqual(bundle);
+    const bundle = await bundleWithLock(P, device, data, 'Secret-2026', ROUNDS_FAST, MIN);
+    expect(parseBundle(P, JSON.parse(JSON.stringify(bundle)), MIN)).toEqual(bundle);
     expect(await openBundle(P, device, bundle)).toBeUndefined();
     expect(await openBundle(P, device, bundle, 'secret-2026')).toBeUndefined();
     expect(await openBundle(P, await createDeviceKey(), bundle, 'Secret-2026')).toBeUndefined();
@@ -115,6 +116,7 @@ describe('the data key and its bundle', () => {
       defined(await openBundle(P, device, without, undefined, true)),
       'one-1',
       ROUNDS_FAST,
+      MIN,
     );
     const changed = await bundleWithLock(
       P,
@@ -122,6 +124,7 @@ describe('the data key and its bundle', () => {
       defined(await openBundle(P, device, locked, 'one-1', true)),
       'two-2',
       ROUNDS_FAST,
+      MIN,
     );
     expect(await openBundle(P, device, changed, 'one-1')).toBeUndefined();
     const off = await bundleWithoutLock(
@@ -134,7 +137,14 @@ describe('the data key and its bundle', () => {
 
   it('the password is compared Unicode-normalised (NFC)', async () => {
     const device = await createDeviceKey();
-    const bundle = await bundleWithLock(P, device, await createDataKey(), 'Grüße-1', ROUNDS_FAST);
+    const bundle = await bundleWithLock(
+      P,
+      device,
+      await createDataKey(),
+      'Grüße-1',
+      ROUNDS_FAST,
+      MIN,
+    );
     expect(await openBundle(P, device, bundle, 'Grüße-1')).toBeDefined();
     // the same text with decomposed umlauts
     expect(await openBundle(P, device, bundle, 'Grüße-1')).toBeDefined();
@@ -142,14 +152,21 @@ describe('the data key and its bundle', () => {
 
   it('a damaged or foreign bundle is not read', async () => {
     const device = await createDeviceKey();
-    const bundle = await bundleWithLock(P, device, await createDataKey(), 'one-1', ROUNDS_FAST);
-    expect(parseBundle(P, { ...bundle, rounds: 10 })).toBeUndefined();
-    expect(parseBundle(P, { ...bundle, rounds: 1.5 })).toBeUndefined();
-    expect(parseBundle(P, { ...bundle, salt: undefined })).toBeUndefined();
-    expect(parseBundle(P, { ...bundle, m: 'other' })).toBeUndefined();
-    expect(parseBundle(P, { ...bundle, kind: 'other' })).toBeUndefined();
+    const bundle = await bundleWithLock(
+      P,
+      device,
+      await createDataKey(),
+      'one-1',
+      ROUNDS_FAST,
+      MIN,
+    );
+    expect(parseBundle(P, { ...bundle, rounds: 10 }, MIN)).toBeUndefined();
+    expect(parseBundle(P, { ...bundle, rounds: 1.5 }, MIN)).toBeUndefined();
+    expect(parseBundle(P, { ...bundle, salt: undefined }, MIN)).toBeUndefined();
+    expect(parseBundle(P, { ...bundle, m: 'other' }, MIN)).toBeUndefined();
+    expect(parseBundle(P, { ...bundle, kind: 'other' }, MIN)).toBeUndefined();
     expect(parseBundle(P, null)).toBeUndefined();
-    expect(parseBundle('other', bundle)).toBeUndefined(); // another prefix's bundle
+    expect(parseBundle('other', bundle, MIN)).toBeUndefined(); // another prefix's bundle
   });
 });
 

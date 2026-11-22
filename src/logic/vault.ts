@@ -13,6 +13,17 @@ const AES = { name: 'AES-GCM', length: 256 } as const;
 /** OWASP 2023 for PBKDF2-HMAC-SHA256; about a second on a phone, once per unlocking. */
 export const ROUNDS = 600_000;
 export const MIN_PASSWORD = 6;
+/** Highest PBKDF2 round count taken, written or read (a stored value above it is refused, not computed). */
+export const MAX_ROUNDS = 3_000_000;
+/**
+ * Lowest round count taken by default, written or read: a foreign entry with fewer rounds would be
+ * cheap to guess against. An app may lower it (`VaultConfig.minRounds`, tests do) but never by accident.
+ */
+export const DEFAULT_MIN_ROUNDS = 100_000;
+
+/** Whether a round count is a whole number from `min` to `MAX_ROUNDS`. */
+export const checkRounds = (rounds: unknown, min: number = DEFAULT_MIN_ROUNDS): rounds is number =>
+  typeof rounds === 'number' && Number.isInteger(rounds) && rounds >= min && rounds <= MAX_ROUNDS;
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
 const random = (n: number) => crypto.getRandomValues(new Uint8Array(n));
@@ -182,7 +193,9 @@ export async function bundleWithLock(
   data: CryptoKey,
   password: string,
   rounds = ROUNDS,
+  minRounds = DEFAULT_MIN_ROUNDS,
 ): Promise<Bundle> {
+  if (!checkRounds(rounds, minRounds)) throw new RangeError('Invalid number of rounds');
   const salt = random(16);
   const ivPassword = random(12);
   const inner = new Uint8Array(
@@ -205,7 +218,11 @@ export async function bundleWithLock(
   };
 }
 
-export function parseBundle(prefix: string, raw: unknown): Bundle | undefined {
+export function parseBundle(
+  prefix: string,
+  raw: unknown,
+  minRounds = DEFAULT_MIN_ROUNDS,
+): Bundle | undefined {
   const m = bundleMarker(prefix);
   if (!isObject(raw) || raw.m !== m || !isB64(raw.iv, 16) || !isB64(raw.ct, 22)) {
     return undefined;
@@ -216,10 +233,7 @@ export function parseBundle(prefix: string, raw: unknown): Bundle | undefined {
   return raw.kind === 'password' &&
     isB64(salt, 22) &&
     isB64(ivPassword, 16) &&
-    typeof rounds === 'number' &&
-    Number.isInteger(rounds) &&
-    rounds >= 1000 &&
-    rounds <= 10_000_000
+    checkRounds(rounds, minRounds)
     ? { m, kind: 'password', salt, rounds, ivPassword, iv, ct }
     : undefined;
 }
@@ -307,6 +321,10 @@ export const isUserName = (v: unknown): v is string =>
   !/[\u0000-\u001f\u007f]/.test(v) &&
   v === v.trim();
 
+/** Whether two typed names are one user (NFC-normalized; entries stored before that keep their name as stored). */
+export const sameUser = (a: string, b: string): boolean =>
+  a.normalize('NFC') === b.normalize('NFC');
+
 const gcmUser = (prefix: string, user: string, iv: Uint8Array) => ({
   name: 'AES-GCM',
   iv: new Uint8Array(iv),
@@ -320,8 +338,12 @@ export async function createUserEntry(
   passphrase: string,
   data: CryptoKey,
   rounds = ROUNDS,
+  minRounds = DEFAULT_MIN_ROUNDS,
 ): Promise<UserEntry> {
+  // stored as NFC, so one name typed composed or decomposed is one user
+  user = typeof user === 'string' ? user.normalize('NFC') : user;
   if (!isUserName(user)) throw new RangeError('Invalid user name');
+  if (!checkRounds(rounds, minRounds)) throw new RangeError('Invalid number of rounds');
   const salt = random(16);
   const iv = random(12);
   const ct = new Uint8Array(
@@ -360,14 +382,11 @@ export async function openUserEntry(
   }
 }
 
-function entryFrom(raw: unknown): UserEntry | undefined {
+function entryFrom(raw: unknown, minRounds: number): UserEntry | undefined {
   if (!isObject(raw)) return undefined;
   const { user, rounds, salt, iv, ct } = raw;
   return isUserName(user) &&
-    typeof rounds === 'number' &&
-    Number.isInteger(rounds) &&
-    rounds >= 1000 &&
-    rounds <= 10_000_000 &&
+    checkRounds(rounds, minRounds) &&
     isB64(salt, 22) &&
     isB64(iv, 16) &&
     isB64(ct, 22)
@@ -376,7 +395,11 @@ function entryFrom(raw: unknown): UserEntry | undefined {
 }
 
 /** The stored key ring, strictly; undefined for anything else (also duplicate users, no entry at all). */
-export function parseUsersBundle(prefix: string, raw: unknown): UsersBundle | undefined {
+export function parseUsersBundle(
+  prefix: string,
+  raw: unknown,
+  minRounds = DEFAULT_MIN_ROUNDS,
+): UsersBundle | undefined {
   if (
     !isObject(raw) ||
     raw.m !== usersMarker(prefix) ||
@@ -387,7 +410,7 @@ export function parseUsersBundle(prefix: string, raw: unknown): UsersBundle | un
   }
   const entries: UserEntry[] = [];
   for (const e of raw.entries) {
-    const entry = entryFrom(e);
+    const entry = entryFrom(e, minRounds);
     if (!entry || entries.some((x) => x.user === entry.user)) return undefined;
     entries.push(entry);
   }
@@ -405,11 +428,15 @@ export const userEntryToText = (prefix: string, e: UserEntry): string =>
   JSON.stringify({ m: usersMarker(prefix), ...e });
 
 /** Strict: anything but exactly an entry as `userEntryToText` made it gives undefined. */
-export function userEntryFromText(prefix: string, text: string): UserEntry | undefined {
+export function userEntryFromText(
+  prefix: string,
+  text: string,
+  minRounds = DEFAULT_MIN_ROUNDS,
+): UserEntry | undefined {
   try {
     const raw: unknown = JSON.parse(text);
     if (!isObject(raw) || raw.m !== usersMarker(prefix)) return undefined;
-    return entryFrom(raw);
+    return entryFrom(raw, minRounds);
   } catch {
     return undefined;
   }

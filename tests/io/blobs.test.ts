@@ -5,7 +5,8 @@ import { createVault } from '../../src/io/vault.ts';
 import { isBlobName } from '../../src/logic/config.ts';
 
 const P = 'app';
-const make = (env = memoryEnvironment()) => createVault({ prefix: P, slots: ['data'] }, env);
+const make = (env = memoryEnvironment()) =>
+  createVault({ prefix: P, slots: ['data'], minRounds: 1000 }, env);
 const bytes = (...n: number[]) => new Uint8Array(n);
 
 describe('blob names', () => {

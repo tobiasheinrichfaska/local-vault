@@ -7,7 +7,7 @@ import { userEntryFromText, userEntryToText } from '../../src/logic/vault.ts';
 const R = 1000;
 const P = 'app';
 const make = (env: VaultEnvironment = memoryEnvironment()) =>
-  createVault({ prefix: P, slots: ['data'], mode: 'users' }, env);
+  createVault({ prefix: P, slots: ['data'], mode: 'users', minRounds: 1000 }, env);
 
 async function setUp(env = memoryEnvironment()) {
   const vault = make(env);
@@ -182,7 +182,7 @@ describe('users mode: the entry as text (a server keeps it for the user)', () =>
   it('reads an entry strictly and keeps the user name inside (not swappable)', async () => {
     const { vault } = await setUp();
     const text = vault.userEntry('anna') ?? '';
-    const ok = userEntryFromText(P, text);
+    const ok = userEntryFromText(P, text, 1000);
     expect(ok?.user).toBe('anna');
     expect(userEntryToText(P, ok!)).toBe(text);
     const o = JSON.parse(text) as Record<string, unknown>;
@@ -190,14 +190,14 @@ describe('users mode: the entry as text (a server keeps it for the user)', () =>
       'kein json',
       '[]',
       JSON.stringify({ ...o, m: 'other-vault-users:1' }),
-      JSON.stringify({ ...o, rounds: 5 }),
+      JSON.stringify({ ...o, rounds: 999 }),
       JSON.stringify({ ...o, salt: 'AAAA' }),
       JSON.stringify({ ...o, ct: 5 }),
       JSON.stringify({ ...o, user: '' }),
     ])
-      expect(userEntryFromText(P, bad), String(bad)).toBeUndefined();
+      expect(userEntryFromText(P, bad, 1000), String(bad)).toBeUndefined();
     // the user name is part of the authenticated data: the entry of anna under another name does not open
-    const swapped = userEntryFromText(P, JSON.stringify({ ...o, user: 'bernd' }));
+    const swapped = userEntryFromText(P, JSON.stringify({ ...o, user: 'bernd' }), 1000);
     const env2 = memoryEnvironment();
     const other = make(env2);
     await other.startVault();

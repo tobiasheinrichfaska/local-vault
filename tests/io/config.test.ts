@@ -87,7 +87,7 @@ describe('prefix enforcement', () => {
 
 describe('two vaults', () => {
   it('do not share state', async () => {
-    const a = createVault({ prefix: 'aaa', slots: ['data'] }, memoryEnvironment());
+    const a = createVault({ prefix: 'aaa', slots: ['data'], minRounds: 1000 }, memoryEnvironment());
     const b = createVault({ prefix: 'bbb', slots: ['data'] }, memoryEnvironment());
     await a.startVault();
     expect(b.isVaultOpen()).toBe(false);

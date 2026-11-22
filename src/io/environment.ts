@@ -5,11 +5,26 @@ import { databaseName, hasPrefix } from '../logic/config.ts';
 import { DEFAULT_TEXTS, type VaultTexts } from '../logic/texts.ts';
 import { createDeviceKey, type Bundle, type Piece, type UsersBundle } from '../logic/vault.ts';
 
+/** What `updateBundle` found and did. */
+export interface BundleUpdate {
+  /** What is stored afterwards (the new bundle when `written`, else what was there). */
+  readonly value: unknown;
+  readonly written: boolean;
+}
+
 export interface VaultEnvironment {
   /** The device key, made and stored on first use (one key even for two callers at once). */
   deviceKey(): Promise<CryptoKey>;
   readBundle(): Promise<unknown>;
   writeBundle(bundle: Bundle | UsersBundle): Promise<void>;
+  /**
+   * Reads the stored bundle and, in the same step, replaces it: `update` gets what is stored right now
+   * and returns the new bundle, or undefined to leave it. No other writer (a second tab) comes in
+   * between — one IndexedDB transaction in the browser. `update` must be synchronous and not throw.
+   */
+  updateBundle(
+    update: (current: unknown) => Bundle | UsersBundle | undefined,
+  ): Promise<BundleUpdate>;
   /** Removes the key bundle (users mode: start anew goes back to the set-up). */
   clearBundle(): Promise<void>;
   /** `name` is the full store name (`<prefix>-<slot>`). */
@@ -26,6 +41,8 @@ export interface VaultEnvironment {
   removeBlob(name: string): Promise<void>;
   /** Every blob name, sorted. */
   listBlobs(): Promise<string[]>;
+  /** Every blob name, sorted, with the length of its stored (encrypted) bytes. */
+  listBlobInfo(): Promise<{ name: string; stored: number }[]>;
   /** Removes every blob (start anew: they would be unreadable under a new data key). */
   clearBlobs(): Promise<void>;
 }
@@ -37,7 +54,7 @@ const DB_VERSION = 2;
 
 type BrowserMessages = Pick<
   VaultTexts,
-  'indexedDbUnavailable' | 'vaultUnreachable' | 'vaultNotStored'
+  'indexedDbUnavailable' | 'vaultUnreachable' | 'vaultNotStored' | 'vaultBlocked'
 >;
 
 /** The environment of a real page; the database is called `<prefix>-vault`. */
@@ -50,6 +67,12 @@ export function browserEnvironment(
   function openDb(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(dbName, DB_VERSION);
+      let blocked = false;
+      // another tab (or an older version of the app) still holds version 1 open: say so, don't wait for ever
+      request.onblocked = () => {
+        blocked = true;
+        reject(new Error(messages.vaultBlocked));
+      };
       // Creates only what is missing: version 1 data (the key bundle, the device key) stays as it is.
       request.onupgradeneeded = () => {
         const names = request.result.objectStoreNames;
@@ -57,6 +80,7 @@ export function browserEnvironment(
         if (!names.contains(BLOBS)) request.result.createObjectStore(BLOBS);
       };
       request.onsuccess = () => {
+        if (blocked) return request.result.close(); // came too late: the caller has given up
         // a newer page asking for an upgrade is never blocked by this connection
         request.result.onversionchange = () => request.result.close();
         resolve(request.result);
@@ -76,7 +100,13 @@ export function browserEnvironment(
         const tx = db.transaction(store, mode);
         const result = work(tx.objectStore(store));
         tx.oncomplete = () => resolve(result);
-        tx.onerror = () => reject(tx.error ?? new Error(messages.vaultUnreachable));
+        // the browser's own error is passed on as it is (a full storage: name `QuotaExceededError`)
+        tx.onerror = (event) =>
+          reject(
+            (event.target as IDBRequest | null)?.error ??
+              tx.error ??
+              new Error(messages.vaultUnreachable),
+          );
         // a full storage aborts the transaction (QuotaExceededError) — not always with an error event
         tx.onabort = () => reject(tx.error ?? new Error(messages.vaultNotStored));
       });
@@ -109,6 +139,21 @@ export function browserEnvironment(
     },
     async writeBundle(bundle) {
       await idb('readwrite', (store) => store.put(bundle, 'bundle'));
+    },
+    async updateBundle(update) {
+      let result: BundleUpdate = { value: undefined, written: false };
+      await idb('readwrite', (store) => {
+        const request = store.get('bundle');
+        request.onsuccess = () => {
+          const next = update(request.result);
+          if (next === undefined) result = { value: request.result, written: false };
+          else {
+            store.put(next, 'bundle');
+            result = { value: next, written: true };
+          }
+        };
+      });
+      return result;
     },
     async clearBundle() {
       await idb('readwrite', (store) => store.delete('bundle'));
@@ -146,6 +191,26 @@ export function browserEnvironment(
       );
       return names.filter((n): n is string => typeof n === 'string').sort();
     },
+    async listBlobInfo() {
+      const found: { name: string; stored: number }[] = [];
+      await idb(
+        'readonly',
+        (store) => {
+          const request = store.openCursor();
+          request.onsuccess = () => {
+            const cursor = request.result;
+            if (!cursor) return;
+            const value: unknown = cursor.value;
+            if (typeof cursor.key === 'string' && isPiece(value)) {
+              found.push({ name: cursor.key, stored: value.ct.byteLength });
+            }
+            cursor.continue();
+          };
+        },
+        BLOBS,
+      );
+      return found.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    },
     async clearBlobs() {
       await idb('readwrite', (store) => store.clear(), BLOBS);
     },
@@ -175,6 +240,12 @@ export function memoryEnvironment(): VaultEnvironment & {
     deviceKey: () => (key ??= createDeviceKey()),
     readBundle: async () => storedBundle,
     writeBundle: async (b) => void (storedBundle = b),
+    updateBundle: async (update) => {
+      const next = update(storedBundle);
+      if (next === undefined) return { value: storedBundle, written: false };
+      storedBundle = next;
+      return { value: next, written: true };
+    },
     clearBundle: async () => void (storedBundle = undefined),
     read: (s) => raw.get(s) ?? null,
     write: (s, v) => void raw.set(s, v),
@@ -183,6 +254,10 @@ export function memoryEnvironment(): VaultEnvironment & {
     writeBlob: async (n, p) => void blobs.set(n, p),
     removeBlob: async (n) => void blobs.delete(n),
     listBlobs: async () => [...blobs.keys()].sort(),
+    listBlobInfo: async () =>
+      [...blobs]
+        .map(([name, piece]) => ({ name, stored: piece.ct.byteLength }))
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
     clearBlobs: async () => blobs.clear(),
   };
 }
@@ -199,6 +274,7 @@ export function guardEnvironment(prefix: string, env: VaultEnvironment): VaultEn
     deviceKey: () => env.deviceKey(),
     readBundle: () => env.readBundle(),
     writeBundle: (bundle) => env.writeBundle(bundle),
+    updateBundle: (update) => env.updateBundle(update),
     clearBundle: () => env.clearBundle(),
     read: (name) => env.read(check(name)),
     write: (name, value) => env.write(check(name), value),
@@ -208,6 +284,7 @@ export function guardEnvironment(prefix: string, env: VaultEnvironment): VaultEn
     writeBlob: (name, piece) => env.writeBlob(name, piece),
     removeBlob: (name) => env.removeBlob(name),
     listBlobs: () => env.listBlobs(),
+    listBlobInfo: () => env.listBlobInfo(),
     clearBlobs: () => env.clearBlobs(),
   };
 }
