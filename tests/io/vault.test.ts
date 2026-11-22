@@ -148,7 +148,8 @@ describe('the app lock', () => {
     (globalThis as { location?: unknown }).location = {
       reload: () => {
         reloaded = true;
-        // the write was stored before the reload
+        // closed first (the keys left the memory), and the write was stored before the reload
+        expect(vault.isVaultOpen()).toBe(false);
         expect(env.raw.has(KEY)).toBe(true);
       },
     };

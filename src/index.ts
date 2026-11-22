@@ -1,7 +1,7 @@
 // Public entry of local-vault: the vault, its environments, the React gate and the pure logic.
 
 // The vault
-export { createVault, type StartResult, type Vault } from './io/vault.ts';
+export { createVault, type ExternalChange, type StartResult, type Vault } from './io/vault.ts';
 export {
   browserEnvironment,
   guardEnvironment,
@@ -9,6 +9,7 @@ export {
   type BundleUpdate,
   type StoredBlob,
   type VaultEnvironment,
+  type VaultSignal,
 } from './io/environment.ts';
 export {
   isQuotaError,

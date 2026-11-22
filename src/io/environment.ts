@@ -4,6 +4,7 @@
 import { databaseName, hasPrefix } from '../logic/config.ts';
 import { DEFAULT_TEXTS, type VaultTexts } from '../logic/texts.ts';
 import { CHUNK_MARK } from '../logic/blobs.ts';
+import { RwLock, type LockMode } from '../logic/lock.ts';
 import { createDeviceKey, type Bundle, type Piece, type UsersBundle } from '../logic/vault.ts';
 
 /**
@@ -19,6 +20,16 @@ export interface BundleUpdate {
   /** What is stored afterwards (the new bundle when `written`, else what was there). */
   readonly value: unknown;
   readonly written: boolean;
+}
+
+/**
+ * A channel between the instances of one page (tabs) that share one storage: messages are plain text and
+ * go to every other subscriber, never back to the poster's own channel object.
+ */
+export interface VaultSignal {
+  post(message: string): void;
+  /** Returns the unsubscribe function. */
+  subscribe(listener: (message: string) => void): () => void;
 }
 
 export interface VaultEnvironment {
@@ -58,6 +69,15 @@ export interface VaultEnvironment {
   listBlobHeads(): Promise<{ name: string; record: StoredBlob }[]>;
   /** Removes every record (start anew: they would be unreadable under a new data key). */
   clearBlobs(): Promise<void>;
+  /**
+   * Optional. Runs `work` under a lock that every instance on this storage honours: blob writes take it
+   * `shared`, `sweepBlobs` takes it `exclusive`, so a sweep never meets a write whose blocks have no head
+   * yet. The browser environment uses a Web Lock named `<prefix>-vault-blobs`; without Web Locks (and
+   * without this method) the vault only guards against its own writes.
+   */
+  blobLock?: <T>(mode: LockMode, work: () => Promise<T>) => Promise<T>;
+  /** Optional. Tells the other instances of the page about a start anew or a change of the keys. */
+  readonly signal?: VaultSignal;
 }
 
 const STORE = 'vault';
@@ -128,7 +148,36 @@ export function browserEnvironment(
     }
   }
 
+  const fallbackLock = new RwLock();
+  const channelName = `${prefix}-vault`;
+
   return {
+    blobLock<T>(mode: LockMode, work: () => Promise<T>): Promise<T> {
+      const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+      if (!locks) return fallbackLock.run(mode, work);
+      return locks.request(`${prefix}-vault-blobs`, { mode }, work) as Promise<T>;
+    },
+    // BroadcastChannel where the browser has one; otherwise nothing is announced or heard
+    signal: {
+      post(message) {
+        if (typeof BroadcastChannel === 'undefined') return;
+        try {
+          const channel = new BroadcastChannel(channelName);
+          channel.postMessage(message);
+          channel.close();
+        } catch {
+          // announcing is best effort
+        }
+      },
+      subscribe(listener) {
+        if (typeof BroadcastChannel === 'undefined') return () => undefined;
+        const channel = new BroadcastChannel(channelName);
+        channel.onmessage = (event: MessageEvent<unknown>) => {
+          if (typeof event.data === 'string') listener(event.data);
+        };
+        return () => channel.close();
+      },
+    },
     async deviceKey() {
       const fresh = await createDeviceKey();
       let stored: CryptoKey = fresh;
@@ -253,6 +302,8 @@ const isRecord = (v: unknown): v is StoredBlob =>
 
 /** Tests: a vault in memory. */
 export function memoryEnvironment(): VaultEnvironment & {
+  readonly blobLock: NonNullable<VaultEnvironment['blobLock']>;
+  readonly signal: VaultSignal;
   /** As localStorage. */
   readonly raw: Map<string, string>;
   /** As the IndexedDB store of blobs (heads, blocks, old pieces). */
@@ -262,7 +313,20 @@ export function memoryEnvironment(): VaultEnvironment & {
   const blobs = new Map<string, StoredBlob>();
   let key: Promise<CryptoKey> | undefined;
   let storedBundle: unknown;
+  const lock = new RwLock();
+  const listeners = new Set<(message: string) => void>();
   return {
+    blobLock: (mode, work) => lock.run(mode, work),
+    // every instance on this environment is "another tab"; delivery is asynchronous as in a browser
+    signal: {
+      post: (message) => {
+        for (const l of [...listeners]) queueMicrotask(() => l(message));
+      },
+      subscribe: (listener) => {
+        listeners.add(listener);
+        return () => void listeners.delete(listener);
+      },
+    },
     raw,
     blobs,
     deviceKey: () => (key ??= createDeviceKey()),
@@ -302,6 +366,10 @@ export function guardEnvironment(prefix: string, env: VaultEnvironment): VaultEn
     return name;
   };
   return {
+    ...(env.blobLock
+      ? { blobLock: <T>(mode: LockMode, work: () => Promise<T>) => env.blobLock!(mode, work) }
+      : {}),
+    ...(env.signal ? { signal: env.signal } : {}),
     deviceKey: () => env.deviceKey(),
     readBundle: () => env.readBundle(),
     writeBundle: (bundle) => env.writeBundle(bundle),

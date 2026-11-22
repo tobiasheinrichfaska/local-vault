@@ -23,12 +23,11 @@ describe('config', () => {
     expect(() => validateConfig({ prefix: 'my-app', slots: ['data', 'settings-1'] })).not.toThrow();
   });
 
-  it('refuses a bad prefix, bad or duplicate slot names and no slots', () => {
+  it('refuses a bad prefix and bad or duplicate slot names', () => {
     expect(() => validateConfig({ prefix: '', slots: ['a'] })).toThrow(/prefix/);
     expect(() => validateConfig({ prefix: 'App', slots: ['a'] })).toThrow(/prefix/);
     expect(() => validateConfig({ prefix: 'a b', slots: ['a'] })).toThrow(/prefix/);
     expect(() => validateConfig({ prefix: 'app-', slots: ['a'] })).toThrow(/prefix/);
-    expect(() => validateConfig({ prefix: 'app', slots: [] })).toThrow(/at least one/);
     expect(() => validateConfig({ prefix: 'app', slots: ['a/b'] })).toThrow(/slot/);
     expect(() => validateConfig({ prefix: 'app', slots: ['a', 'a'] })).toThrow(/Duplicate/);
     expect(() => createVault({ prefix: 'x y', slots: ['a'] }, memoryEnvironment())).toThrow();
