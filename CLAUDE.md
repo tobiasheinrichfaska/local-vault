@@ -13,7 +13,7 @@ that opens the vault before the app and locks again after 5 minutes in the backg
 card for the app lock. Extracted 2026-11-21 from the web app where it originated, so that several
 apps can share one implementation. **Status (2026-11-21): ported with an English API and an instance
 API (`createVault`), users mode (key ring) and blobs on `main`, review fixes 2026-11-22 (concurrent
-tabs, PBKDF2 round limits, quota errors), 219 tests, blobs in blocks (W4); consumed by no app from a Git tag yet, not published to npm.** Old →
+tabs, PBKDF2 round limits, quota errors), `close()`, `sweepBlobs()`, `onExternalChange`, empty `slots` (2026-11-22), 274 tests, blobs in blocks (W4); consumed by no app from a Git tag yet, not published to npm.** Old →
 new names: [`docs/api-mapping.md`](docs/api-mapping.md).
 
 **Platform:** web (IndexedDB, localStorage, Web Crypto; not for React Native native builds)
@@ -36,7 +36,7 @@ data and no app words. Public entry: `src/index.ts`.
 - Every rule keeps its test: a plain value in a slot is not read; an unreadable slot is never
   overwritten; a closed vault throws on read/write; write errors reach `onError`; lock on/off/new
   password leave the data untouched; wrong password refused; the 5-minute re-lock rule; the device
-  key is non-extractable; "start anew" leaves empty data under a new key (blobs removed); a blob is bound to its name and to the data key; a failed blob write rejects, never silently. A blob is cut into blocks, each bound to name, write, index and block count; a failed or interrupted write leaves the old content (blocks first, then one head write, then the old blocks go); an old one-piece blob stays readable.
+  key is non-extractable; "start anew" leaves empty data under a new key (blobs removed); a blob is bound to its name and to the data key; a failed blob write rejects, never silently. A blob is cut into blocks, each bound to name, write, index and block count; a failed or interrupted write leaves the old content (blocks first, then one head write, then the old blocks go); an old one-piece blob stays readable. `close()` stores pending writes first, then refuses all reads/writes until unlock/login; the sweep never removes the blocks of a valid head or of a write in progress and keeps those of a head it cannot judge; a change announced to other tabs is never delivered to its sender.
 
 ---
 
@@ -52,9 +52,10 @@ data and no app words. Public entry: `src/index.ts`.
 | `src/index.ts` | Public entry: `createVault`, environments, components, config, texts, crypto pieces |
 | `src/logic/vault.ts`, `base64url.ts` | Crypto pieces: keys, sealed text, bundles, password check, re-lock rule (prefix is the first argument); rounds limits `DEFAULT_MIN_ROUNDS` (100 000) / `MAX_ROUNDS` (3 000 000) / `checkRounds` (written and read alike); users mode: `createUserEntry`, `openUserEntry`, `parseUsersBundle`, `userEntryToText`/`FromText`, `sameUser` (NFC) |
 | `src/logic/config.ts`, `texts.ts` | `VaultConfig` + validation + store names; `VaultTexts` + English `DEFAULT_TEXTS` |
-| `src/io/vault.ts` | `createVault(config, env?)`: the vault instance (`Vault`): slots (text, in memory) and blobs (`putBytes`/`getBytes`/`getBytesChunks`/`removeBytes`/`listBytes`/`listBytesInfo`, bytes in IndexedDB, in blocks of `config.blobChunkSize`); `mode: 'users'` = key ring per user (`setupFirstUser`, `loginUser`, `addUser`, `removeUser`, `changeUserPassphrase`, `userEntry`, `joinWithEntry`) |
+| `src/io/vault.ts` | `createVault(config, env?)`: the vault instance (`Vault`): slots (text, in memory) and blobs (`putBytes`/`getBytes`/`getBytesChunks`/`removeBytes`/`listBytes`/`listBytesInfo`, bytes in IndexedDB, in blocks of `config.blobChunkSize`); `mode: 'users'` = key ring per user (`setupFirstUser`, `loginUser`, `addUser`, `removeUser`, `changeUserPassphrase`, `userEntry`, `joinWithEntry`); `close()` (locks without a reload), `sweepBlobs()` (orphaned blocks), `onExternalChange(listener)` (another tab started anew / changed the keys) |
+| `src/logic/lock.ts` | `RwLock`: shared/exclusive lock for async work (blob writes shared, sweep exclusive) where the environment has no `blobLock` |
 | `src/logic/blobs.ts` | Blobs in blocks, pure: `DEFAULT_BLOB_CHUNK` (2 MiB), `MAX_BLOB_CHUNK`, `checkChunkSize`, block keys (`~<name>#<gen>#<i>`, `CHUNK_MARK`), the authenticated data (`chunkSlot`, `headSlot`, `legacySlot`), the head (`BlobHead`, `headToBytes`/`headFromBytes`) |
-| `src/io/environment.ts` | `VaultEnvironment` (slots in localStorage; keys and blobs in IndexedDB `<prefix>-vault`, version 2; blob records `readBlob`/`writeBlob`/`removeBlob(s)`/`listBlobKeys`/`listBlobHeads`/`clearBlobs`), `browserEnvironment(prefix)`, `memoryEnvironment()`, `guardEnvironment` |
+| `src/io/environment.ts` | `VaultEnvironment` (slots in localStorage; keys and blobs in IndexedDB `<prefix>-vault`, version 2; blob records `readBlob`/`writeBlob`/`removeBlob(s)`/`listBlobKeys`/`listBlobHeads`/`clearBlobs`; optional `blobLock` = Web Lock `<prefix>-vault-blobs` / `RwLock`, optional `signal` = `BroadcastChannel` `<prefix>-vault` / in memory), `browserEnvironment(prefix)`, `memoryEnvironment()`, `guardEnvironment` |
 | `src/ui/VaultGate.tsx`, `LockSettings.tsx`, `parts.tsx` | The gate, the lock settings card, shared pieces |
 | `tests/logic/`, `tests/io/`, `tests/ui/` | Unit tests (crypto, vault rules, config/prefix, two instances), `renderToString` smoke tests, coupling guard (no app words, no foreign imports) |
 | `scripts/fix-declarations.mjs` | Rewrites `.ts`/`.tsx` imports in the emitted `.d.ts` files |
@@ -84,7 +85,7 @@ defaults.
 ```bash
 npm install
 npm run typecheck
-npm test            # 219 tests on 2026-11-22 (logic 19, io 190, ui 10); io includes fake-indexeddb
+npm test            # 274 tests on 2026-11-22 (logic 22, io 242, ui 10); io includes fake-indexeddb
 npm run format:check
 npm run build
 ```
@@ -110,8 +111,11 @@ npm run build
   `putBytes` still needs the whole input as one `Uint8Array` (no streaming write: the block count is part of
   the authenticated data and the head is written last). While writing, old and new content are in the storage
   at once (up to 2× the blob). A write is atomic, an interrupted one (tab closed) leaves orphan blocks without
-  a head: invisible, swept by the next `putBytes`/`removeBytes` of that name or by "start anew", but until
-  then they take room. Calls on one name are serialised per vault instance, not across tabs (see "One tab
+  a head: invisible, swept by the next `putBytes`/`removeBytes` of that name, by "start anew" or by
+  `sweepBlobs()` (call it at the start; it takes an exclusive lock that blob writes hold shared — a Web
+  Lock `<prefix>-vault-blobs`, so other tabs are covered; in a browser without Web Locks, or an
+  environment without `blobLock`, only this instance's writes are, so sweep there only while no other tab
+  is open); until then they take room. Calls on one name are serialised per vault instance, not across tabs (see "One tab
   per app"). Each block is its own IndexedDB transaction on a freshly opened connection (about 100 for
   200 MB): slower than one big put, not measured. Old one-piece blobs are listed by reading them whole
   (`listBytesInfo`) until they are replaced. A rollback to an older complete state (old head + its blocks
@@ -123,6 +127,8 @@ npm run build
   app's (the package only refuses under 6 characters); no limit of failed logins (the app or a server
   does that); an entry swapped to another user name does not open (the name is authenticated data).
 - **Removing a user does not rotate the data key (2026-11-22):** `removeUser` only drops his entry from the ring; the data key stays the same, so a copy of his entry (for example one kept on a server) still opens the data with his passphrase. Treat a removed user as having had access, or "start anew".
+- **`close()` and the keys in memory (2026-11-22):** `close()` drops the vault's references to the data key, the opened slots and the user, but JavaScript gives no way to wipe memory or a `CryptoKey`: the garbage collector decides when it is gone, and strings the app read from `readSlot` stay with the app. Reads already started may finish after `close()`. `close()` keeps this instance's view of the ring: after a change by another tab call `startVault()` again (users mode) before `loginUser`. The gate does not react to `close()` by itself (`lockNow` still reloads the page); an app that closes must show its own login or reload.
+- **`onExternalChange` (2026-11-22):** only a `BroadcastChannel` (`<prefix>-vault`) carries it; a browser without one neither announces nor hears (no `storage`-event fallback). It reports a start anew and a change of the keys (user added/removed, passphrase, app lock) of another instance on the same origin and prefix, not slot or blob data, and nothing that happened while this tab was not listening (a tab opened later reads the new state when it starts). The instance does not close itself: after a start anew elsewhere its data key is dead and a slot write would put a value under it into the fresh storage, so the app should `close()` and reload.
 - **One tab per app in device mode (2026-11-22):** the device mode keeps the data key's bundle and the slots in this tab's memory; a second tab of the same app can write the slots it opened earlier over the other's newer state (slots are whole values, last write wins). The key bundle itself is made safely (put-if-absent in one IndexedDB step), and in users mode every ring change is made on the stored ring (never on an older copy), but slot data is not merged between tabs: apps open one tab at a time (Web Locks in the app) or accept last-write-wins.
 - **IndexedDB version 2 is not backwards compatible (2026-11-22):** the first start of this version upgrades the database `<prefix>-vault` in place; a page still running an older version of the package (version 1 code) is blocked by the upgrade (`vaultBlocked` text instead of waiting for ever) and cannot open version 2 afterwards. Roll all tabs forward together.
 - **Prefixes must not overlap (2026-11-22):** a prefix must not be the word-start of another prefix of the same site (`app` and `app-admin`): the guard only checks `<prefix>-`, so `app-admin-data` also belongs to `app` as far as the guard can tell, and a slot `admin-data` of `app` collides with the slot `data` of `app-admin`.
@@ -135,4 +141,4 @@ npm run build
 - Forgotten password: no recovery; "start anew" discards the device's data.
 - The coupling guard forbids app words in `src/`.
 
-*Last updated: 2026-11-22 — review fixes (concurrent tabs, rounds limits, quota helpers); before: users mode (key ring)*
+*Last updated: 2026-11-22 — `close()`, `sweepBlobs()`, `onExternalChange`, `slots: []`; before: review fixes (concurrent tabs, rounds limits, quota helpers), users mode (key ring)*

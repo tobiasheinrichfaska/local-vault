@@ -59,6 +59,13 @@ which blocks belong. A write is atomic — an error (full storage) or an interru
 content — and a block that is missing, moved, changed or from another write makes `getBytes` throw.
 Peak memory is the bytes plus about three blocks. Blobs of the earlier one-piece format stay readable.
 
+An interrupted write (tab closed) can leave blocks that belong to no blob: `await vault.sweepBlobs()`
+(call it at the start, once the vault is open) removes them and returns `{ removed }`. It never touches a
+complete blob or a write on its way: blob writes hold a lock shared, the sweep holds it exclusive — a Web
+Lock named `<prefix>-vault-blobs`, so other tabs are covered; in a browser without Web Locks only this
+instance's writes are, so sweep there while no other tab is open. An app that uses only blobs
+configures `slots: []`.
+
 Names: lower case, digits and `. _ : / -`, up to 200 characters (`isBlobName`). `saved()` waits for
 blobs on their way too; "start anew" removes them with the slots. An existing version 1 database is
 upgraded in place (the key bundle and the device key stay).
@@ -93,6 +100,21 @@ again): `vault.userEntry('anna')` is the entry as text (the server cannot unwrap
 passphrase) and a fresh device takes it back with `vault.joinWithEntry(text, passphrase)`. The login
 secret the server checks must be derived apart from this key (the app's part). A stored bundle that
 cannot be read (or is of the other mode) is never replaced except by "start anew".
+
+### Locking without a reload, and other tabs
+
+`await vault.close()` locks at once: new reads and writes throw as for a closed vault, what is on its way
+(slot values, blobs, a sweep) is stored first, then the data key, the user and the opened slots are dropped
+from the instance. The stored keys stay, so `unlock(password)` (app lock on) or `loginUser(user, passphrase)`
+(users mode) opens again without a reload; `startVault()` also opens again (device mode without a lock) or
+reads the stored ring anew (users mode). `lockNow()` closes and then reloads. JavaScript cannot wipe memory:
+the references go, the garbage collector does the rest.
+
+`vault.onExternalChange((change) => …)` tells you when another tab of the same app (same prefix) started
+anew (`change.kind === 'startAnew'`) or changed the keys — user added or removed, passphrase changed, app
+lock turned on or off (`'keys'`). The instance does not close itself: show a hint, call `close()`, and after a
+start anew reload. It uses a `BroadcastChannel` (`<prefix>-vault`); a browser without one neither announces
+nor hears. A custom `VaultEnvironment` may offer `blobLock` and `signal` for the same jobs.
 
 Texts in another language: `createVault({ prefix, slots, texts: { opening: '…', ... } })` or the
 `texts` prop of the components; every field of `VaultTexts` has an English default

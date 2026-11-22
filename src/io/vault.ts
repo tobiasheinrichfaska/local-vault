@@ -14,10 +14,12 @@ import {
   headSlot,
   headToBytes,
   legacySlot,
+  isChunkKey,
   newGeneration,
   type BlobHead,
 } from '../logic/blobs.ts';
 import { isBlobName, storageName, validateConfig, type VaultConfig } from '../logic/config.ts';
+import { RwLock, type LockMode } from '../logic/lock.ts';
 import { resolveTexts, type VaultTexts } from '../logic/texts.ts';
 import {
   DEFAULT_MIN_ROUNDS,
@@ -60,6 +62,15 @@ export type StartResult =
   /** Users mode, nothing stored yet: `setupFirstUser` (or `joinWithEntry`) comes next. */
   | { readonly kind: 'setup' }
   | { readonly kind: 'error'; readonly error: string };
+
+/**
+ * What another instance on the same page (another tab) did: `startAnew` = it gave up the device's data
+ * (the data key this instance holds belongs to the old data now); `keys` = it changed the key ring or
+ * bundle (user added or removed, passphrase changed, app lock turned on/off or a new password).
+ */
+export interface ExternalChange {
+  readonly kind: 'startAnew' | 'keys';
+}
 
 export interface Vault {
   readonly config: VaultConfig;
@@ -162,11 +173,45 @@ export interface Vault {
    * cannot be opened is listed with size 0.
    */
   listBytesInfo(startsWith?: string): Promise<{ name: string; size: number }[]>;
+  /**
+   * Removes the blocks that belong to no blob: what an interrupted `putBytes` (tab closed, failed
+   * clean-up) left behind. A block is removed when there is no head under its name, the head is of the
+   * earlier one-piece format, or the head names another write (generation). A head that cannot be
+   * opened (or is of an unknown version) keeps its blocks — nothing is guessed against what might be
+   * data. Never touches a blob that is complete or a write on its way: the sweep runs under an exclusive
+   * lock that every blob write holds shared (in this instance always; in other tabs where the browser has
+   * Web Locks — without them a sweep in one tab could remove blocks of a write another tab has not yet
+   * given a head, so then sweep only while no other tab is open). Call it at the start, once the vault is
+   * open. Throws while the vault is closed. Returns how many blocks it removed.
+   */
+  sweepBlobs(): Promise<{ removed: number }>;
   /** Resolves when everything written so far (slots and blobs) is stored. */
   saved(): Promise<void>;
   /** Every storage error after the fact (writing is asynchronous); returns the unsubscribe function. */
   onError(listener: (error: string) => void): () => void;
-  /** Locks now: waits for the last write, then reloads (the opened data leaves memory). */
+  /**
+   * Locks without reloading the page. From the call on every read and write throws as for a closed vault;
+   * what is on its way (slot values waiting to be sealed, blobs being written, a sweep) is stored first —
+   * a write is never cut off or left half-way — then the data key, the logged-in user and the opened
+   * slots are dropped from this instance. Reads that already started (`getBytes`, `getBytesChunks`)
+   * may still finish. The stored keys stay: afterwards `unlock` (app lock on) or `loginUser` (users
+   * mode) opens again with this instance's view of the keys, and `startVault()` opens again
+   * without a lock (or, in users mode, reads the stored ring anew — use it after `onExternalChange`).
+   * Device mode without the app lock has nothing to ask: only `startVault()` opens it again. Calling it
+   * twice, or before a start, is fine. The listeners (`onError`, `onExternalChange`) stay.
+   */
+  close(): Promise<void>;
+  /**
+   * Called when another instance on the same page (another tab, same prefix) started anew or changed
+   * the keys (see `ExternalChange`). This instance does not close itself: the app decides — usually
+   * `close()` and, after a `startAnew`, a reload (its data key and slots are of the old data, a write
+   * would put a value under the dead key into the fresh storage). Transport: a `BroadcastChannel` named
+   * `<prefix>-vault`; where the browser has none, nothing is announced and nothing heard. Only
+   * instances on the same origin and prefix hear each other; there is no message for a change of slot
+   * or blob data. Returns the unsubscribe function.
+   */
+  onExternalChange(listener: (change: ExternalChange) => void): () => void;
+  /** Locks now: closes (see `close`), then reloads the page. */
   lockNow(): void;
   /** Gives up this device's data (unreadable, or the password forgotten): empty, under a new data key. */
   startAnew(): Promise<void>;
@@ -217,6 +262,40 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       : texts.invalidRounds(minRounds, MAX_ROUNDS);
   /** Without an explicit count: the standard one, or the configured lowest if that is higher. */
   const roundsOf = (rounds: number | undefined) => rounds ?? Math.max(ROUNDS, minRounds);
+  /** Set from the call of `close` until it is done: every read and write is refused. */
+  let closing: Promise<void> | undefined;
+  const instanceId = [...crypto.getRandomValues(new Uint8Array(8))]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  const external = new Set<(change: ExternalChange) => void>();
+  let unsubscribeSignal: (() => void) | undefined;
+  /** Best effort: the other tabs hear it, a failure here never fails the change itself. */
+  const announce = (kind: ExternalChange['kind']) => {
+    try {
+      environment.signal?.post(JSON.stringify({ v: 1, from: instanceId, kind }));
+    } catch {
+      // see above
+    }
+  };
+  const heard = (text: string) => {
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (typeof value !== 'object' || value === null) return;
+    const { v, from, kind } = value as Record<string, unknown>;
+    if (v !== 1 || typeof from !== 'string' || from === instanceId) return;
+    if (kind !== 'startAnew' && kind !== 'keys') return;
+    for (const listener of [...external]) {
+      try {
+        listener({ kind });
+      } catch {
+        // one listener's bug does not stop the others
+      }
+    }
+  };
   let ring: UsersBundle | undefined;
   let loggedUser: string | undefined;
   /** Users mode: a stored bundle that could not be read — never replaced except by `startAnew`. */
@@ -302,6 +381,7 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
         return usersBundle(prefix, entries);
       });
       if (seen) ring = parseUsersBundle(prefix, result.value, minRounds) ?? seen;
+      if (result.written) announce('keys');
     } catch (error) {
       return texts.notSaved(message(error));
     }
@@ -316,6 +396,7 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       );
       if (result.written) {
         ring = parseUsersBundle(prefix, result.value, minRounds);
+        announce('keys');
         return undefined;
       }
       const other = parseUsersBundle(prefix, result.value, minRounds);
@@ -328,7 +409,7 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
   }
 
   function requireOpen(): Opened {
-    if (!opened) throw new Error(texts.notOpen);
+    if (!opened || closing) throw new Error(texts.notOpen);
     return opened;
   }
 
@@ -368,6 +449,7 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
     }
     o.bundle = next;
     bundle = next;
+    announce('keys');
     return undefined;
   }
 
@@ -393,7 +475,35 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
     return run;
   }
 
+  // Blob writes hold this lock shared, the sweep exclusive (see `sweepBlobs`).
+  const ownLock = new RwLock();
+  const withBlobLock = <T>(mode: LockMode, work: () => Promise<T>): Promise<T> =>
+    environment.blobLock ? environment.blobLock(mode, work) : ownLock.run(mode, work);
+
   const unreadable = () => new Error(texts.slotUnreadable);
+  const BLOCK_KEY = /^~([^#]+)#([0-9a-f]{16})#\d+$/;
+
+  /**
+   * The generation the head of `name` names; `null` when the blob has no head in blocks (none, or the
+   * earlier one-piece format) so that every block of it is a leftover; `''` when the head is there but
+   * cannot be judged (cannot be opened, other version) so that its blocks are kept.
+   */
+  async function headGeneration(
+    data: CryptoKey,
+    name: string,
+    exists: boolean,
+  ): Promise<string | null> {
+    if (!exists) return null;
+    const record = await environment.readBlob(name);
+    if (!record) return ''; // there is a value under the name that is no piece: not ours to judge
+    if (record.v === undefined) return null;
+    if (record.v !== HEAD_VERSION) return '';
+    try {
+      return (await openHead(data, name, record)).gen;
+    } catch {
+      return '';
+    }
+  }
 
   /** The head of a blob in blocks, opened; throws for anything that is not a head of this name. */
   async function openHead(data: CryptoKey, name: string, record: StoredBlob): Promise<BlobHead> {
@@ -488,6 +598,25 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
     await Promise.all([...writing]);
   };
 
+  function close(): Promise<void> {
+    closing ??= (async () => {
+      try {
+        await saved(); // new writes are refused from now on, so this settles
+        const o = opened;
+        opened = undefined;
+        loggedUser = undefined;
+        waiting.clear();
+        if (o) {
+          o.content.clear();
+          o.unreadable.clear();
+        }
+      } finally {
+        closing = undefined;
+      }
+    })();
+    return closing;
+  }
+
   return {
     config,
     texts,
@@ -577,13 +706,15 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       blobName(name);
       const o = requireOpen();
       await track(
-        perName(name, async () => {
-          try {
-            await writeBlocks(o.data, name, bytes);
-          } catch (error) {
-            throw new Error(texts.notSaved(message(error)), { cause: error });
-          }
-        }),
+        withBlobLock('shared', () =>
+          perName(name, async () => {
+            try {
+              await writeBlocks(o.data, name, bytes);
+            } catch (error) {
+              throw new Error(texts.notSaved(message(error)), { cause: error });
+            }
+          }),
+        ),
       );
     },
 
@@ -626,6 +757,33 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       );
     },
 
+    async sweepBlobs() {
+      const o = requireOpen();
+      let removed = 0;
+      await track(
+        withBlobLock('exclusive', async () => {
+          const all = await environment.listBlobKeys();
+          const names = new Set(all.filter((k) => !isChunkKey(k)));
+          const orphans: string[] = [];
+          const heads = new Map<string, string | null>(); // name -> generation, null: no head, '': keep all
+          for (const key of all) {
+            const m = BLOCK_KEY.exec(key);
+            if (!m) continue; // not a block key of this format: left alone
+            const [, blobOf, gen] = m as unknown as [string, string, string];
+            let current = heads.get(blobOf);
+            if (current === undefined) {
+              current = await headGeneration(o.data, blobOf, names.has(blobOf));
+              heads.set(blobOf, current);
+            }
+            if (current !== '' && gen !== current) orphans.push(key);
+          }
+          await environment.removeBlobs(orphans);
+          removed = orphans.length;
+        }),
+      );
+      return { removed };
+    },
+
     async listBytes(startsWith = '') {
       requireOpen();
       return (await environment.listBlobKeys(startsWith)).filter(isBlobName);
@@ -655,8 +813,23 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       return () => listeners.delete(listener);
     },
 
+    close,
+
+    onExternalChange(listener) {
+      external.add(listener);
+      if (!unsubscribeSignal && environment.signal)
+        unsubscribeSignal = environment.signal.subscribe(heard);
+      return () => {
+        external.delete(listener);
+        if (external.size === 0) {
+          unsubscribeSignal?.();
+          unsubscribeSignal = undefined;
+        }
+      };
+    },
+
     lockNow() {
-      void saved().finally(() => location.reload());
+      void close().finally(() => location.reload());
     },
 
     async startAnew() {
@@ -673,6 +846,7 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
         await environment.clearBundle();
         ring = undefined;
         damaged = false;
+        announce('startAnew');
         return;
       }
       const d = device ?? (await environment.deviceKey());
@@ -680,6 +854,7 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       await environment.writeBundle(fresh);
       device = d;
       bundle = fresh;
+      announce('startAnew');
     },
 
     async setLock(password, current, rounds) {
