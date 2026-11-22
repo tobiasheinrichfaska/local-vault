@@ -60,6 +60,9 @@ export interface VaultTexts {
   indexedDbUnavailable: string;
   vaultUnreachable: string;
   vaultNotStored: string;
+  vaultBlocked: string;
+  invalidRounds: (min: number, max: number) => string;
+  ringChanged: string;
   notUsersMode: string;
   notDeviceMode: string;
   alreadySetUp: string;
@@ -136,6 +139,10 @@ export const DEFAULT_TEXTS: VaultTexts = {
   indexedDbUnavailable: 'IndexedDB is not available',
   vaultUnreachable: 'Vault not reachable',
   vaultNotStored: 'Vault: not stored',
+  vaultBlocked:
+    'The storage is in use by another tab or an older version of the app: close it and try again.',
+  invalidRounds: (min, max) => `The number of rounds must be a whole number from ${min} to ${max}.`,
+  ringChanged: 'The users were changed elsewhere meanwhile: reload and try again.',
   notUsersMode: 'This vault has no users (it is not in users mode).',
   notDeviceMode: 'This vault is in users mode: there is no device lock to change.',
   alreadySetUp: 'The key ring is already set up.',

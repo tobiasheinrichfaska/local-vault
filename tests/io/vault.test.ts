@@ -11,7 +11,7 @@ const P = 'app';
 const KEY = 'app-data'; // the browser store name of the slot "data"
 
 const make = (env: VaultEnvironment = memoryEnvironment()) =>
-  createVault({ prefix: P, slots: ['data'] }, env);
+  createVault({ prefix: P, slots: ['data'], minRounds: 1000 }, env);
 
 describe('starting the vault', () => {
   it('the very first start makes the keys and opens empty', async () => {
@@ -76,6 +76,7 @@ describe('starting the vault', () => {
       ...other,
       readBundle: () => env.readBundle(),
       writeBundle: () => Promise.resolve(),
+      updateBundle: async () => ({ value: await env.readBundle(), written: false }),
     };
     const result = await make(wrong).startVault();
     expect(result.kind).toBe('error');

@@ -6,8 +6,16 @@ export {
   browserEnvironment,
   guardEnvironment,
   memoryEnvironment,
+  type BundleUpdate,
   type VaultEnvironment,
 } from './io/environment.ts';
+export {
+  isQuotaError,
+  requestPersistence,
+  storageEstimate,
+  type StorageEstimate,
+  type StorageNavigator,
+} from './io/storage.ts';
 
 // Components
 export { VaultGate, type VaultGateProps } from './ui/VaultGate.tsx';
@@ -26,12 +34,15 @@ export { DEFAULT_TEXTS, resolveTexts, type VaultTexts } from './logic/texts.ts';
 
 // Logic: crypto pieces (the prefix is the app's)
 export {
+  DEFAULT_MIN_ROUNDS,
   LOCK_AFTER_MINUTES,
+  MAX_ROUNDS,
   MIN_PASSWORD,
   ROUNDS,
   bundleWithLock,
   bundleWithoutLock,
   checkPassword,
+  checkRounds,
   createDataKey,
   createDeviceKey,
   createUserEntry,
@@ -43,6 +54,7 @@ export {
   openUserEntry,
   parseBundle,
   parseUsersBundle,
+  sameUser,
   seal,
   sealText,
   shouldRelock,

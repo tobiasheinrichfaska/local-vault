@@ -5,13 +5,19 @@
 import { isBlobName, storageName, validateConfig, type VaultConfig } from '../logic/config.ts';
 import { resolveTexts, type VaultTexts } from '../logic/texts.ts';
 import {
+  DEFAULT_MIN_ROUNDS,
+  MAX_ROUNDS,
+  ROUNDS,
   bundleWithLock,
   bundleWithoutLock,
   checkPassword,
+  checkRounds,
   createDataKey,
   createUserEntry,
   isSealed,
   isUserName,
+  sameUser,
+  type UserEntry,
   openUserEntry,
   parseUsersBundle,
   userEntryFromText,
@@ -102,13 +108,21 @@ export interface Vault {
   // they are not held in memory: every call goes to the storage. They stay apart from the slots
   // (a slot name has no `:`), and "start anew" removes them with the slots. All of them throw
   // while the vault is closed.
-  /** Stores the bytes encrypted; resolves when stored, rejects when the browser does not store them. */
+  /**
+   * Stores the bytes encrypted; resolves when stored, rejects when the browser does not store them.
+   * The browser's own error stays as `error.cause` (`isQuotaError(error)` tells a full storage).
+   */
   putBytes(name: string, bytes: Uint8Array): Promise<void>;
   /** The bytes, undefined when there is no such blob; throws for one that cannot be opened. */
   getBytes(name: string): Promise<Uint8Array | undefined>;
   removeBytes(name: string): Promise<void>;
   /** Names of all blobs, sorted; with `startsWith` only those beginning so. */
   listBytes(startsWith?: string): Promise<string[]>;
+  /**
+   * Names of all blobs with their size in bytes (the plain bytes, not the encrypted ones), sorted;
+   * with `startsWith` only those beginning so. For showing what takes the room.
+   */
+  listBytesInfo(startsWith?: string): Promise<{ name: string; size: number }[]>;
   /** Resolves when everything written so far (slots and blobs) is stored. */
   saved(): Promise<void>;
   /** Every storage error after the fact (writing is asynchronous); returns the unsubscribe function. */
@@ -132,6 +146,9 @@ interface Opened {
   readonly unreadable: Set<string>;
 }
 
+/** AES-GCM adds a 16-byte tag to the plain length. */
+const GCM_TAG = 16;
+
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** `env` defaults to the browser (IndexedDB + localStorage); tests pass `memoryEnvironment()`. */
@@ -153,6 +170,14 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
   const writing = new Set<Promise<void>>(); // blobs on their way
   const listeners = new Set<(error: string) => void>();
   const usersMode = config.mode === 'users';
+  const minRounds = config.minRounds ?? DEFAULT_MIN_ROUNDS;
+  /** The reason a round count given by the app is refused (undefined: fine or not given). */
+  const roundsProblem = (rounds: number | undefined) =>
+    rounds === undefined || checkRounds(rounds, minRounds)
+      ? undefined
+      : texts.invalidRounds(minRounds, MAX_ROUNDS);
+  /** Without an explicit count: the standard one, or the configured lowest if that is higher. */
+  const roundsOf = (rounds: number | undefined) => rounds ?? Math.max(ROUNDS, minRounds);
   let ring: UsersBundle | undefined;
   let loggedUser: string | undefined;
   /** Users mode: a stored bundle that could not be read — never replaced except by `startAnew`. */
@@ -199,15 +224,68 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
     if (!usersMode) throw new Error(texts.notUsersMode);
   };
 
-  async function writeRing(entries: UsersBundle['entries']): Promise<string | undefined> {
-    const next = usersBundle(prefix, entries);
+  // Ring changes of this instance run one after the other (each builds on the stored ring, not on
+  // a copy taken before an await) ...
+  let chain: Promise<unknown> = Promise.resolve();
+  const serial = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = chain.then(task, task);
+    chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+
+  // ... and against another tab or instance: the change is made on what is stored at that moment, in
+  // one step of the storage (never on this instance's older view, which could bring a removed user back).
+  async function changeRing(
+    change: (current: UsersBundle) => readonly UserEntry[] | string,
+  ): Promise<string | undefined> {
+    let refusal: string | undefined;
+    let seen: UsersBundle | undefined;
     try {
-      await environment.writeBundle(next);
+      const result = await environment.updateBundle((stored) => {
+        if (stored === undefined) {
+          refusal = texts.notStarted;
+          return undefined;
+        }
+        const current = parseUsersBundle(prefix, stored, minRounds);
+        if (!current) {
+          refusal = texts.keyDamaged;
+          return undefined;
+        }
+        seen = current;
+        const entries = change(current);
+        if (typeof entries === 'string') {
+          refusal = entries;
+          return undefined;
+        }
+        return usersBundle(prefix, entries);
+      });
+      if (seen) ring = parseUsersBundle(prefix, result.value, minRounds) ?? seen;
     } catch (error) {
       return texts.notSaved(message(error));
     }
-    ring = next;
-    return undefined;
+    return refusal;
+  }
+
+  /** The very first ring: only where nothing is stored — a tab that was faster keeps its ring. */
+  async function createRing(entry: UserEntry): Promise<string | undefined> {
+    try {
+      const result = await environment.updateBundle((stored) =>
+        stored === undefined ? usersBundle(prefix, [entry]) : undefined,
+      );
+      if (result.written) {
+        ring = parseUsersBundle(prefix, result.value, minRounds);
+        return undefined;
+      }
+      const other = parseUsersBundle(prefix, result.value, minRounds);
+      if (!other) damaged = true;
+      else ring = other;
+      return other ? texts.alreadySetUp : texts.keyDamaged;
+    } catch (error) {
+      return texts.notSaved(message(error));
+    }
   }
 
   function requireOpen(): Opened {
@@ -225,7 +303,10 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
         const o = opened;
         if (!o) return waiting.clear();
         try {
-          environment.write(name(slot), await sealText(prefix, o.data, name(slot), value));
+          const sealed = await sealText(prefix, o.data, name(slot), value);
+          // started anew (or closed) while sealing: this value belongs to the old key, never write it
+          if (opened !== o) return waiting.clear();
+          environment.write(name(slot), sealed);
         } catch (error) {
           report(texts.notSaved(message(error)));
         }
@@ -292,7 +373,7 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
             ring = undefined;
             return { kind: 'setup' };
           }
-          const read = parseUsersBundle(prefix, stored);
+          const read = parseUsersBundle(prefix, stored, minRounds);
           if (!read) {
             damaged = true;
             return { kind: 'error', error: texts.keyDamaged };
@@ -306,12 +387,18 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       try {
         device = await environment.deviceKey();
         const storedBundle = await environment.readBundle();
-        const read = parseBundle(prefix, storedBundle);
+        const read = parseBundle(prefix, storedBundle, minRounds);
         if (storedBundle !== undefined && !read) return { kind: 'error', error: texts.keyDamaged };
         if (!read) {
-          const fresh = await createDataKey();
-          bundle = await bundleWithoutLock(prefix, device, fresh);
-          await environment.writeBundle(bundle);
+          // first start: put-if-absent in one step, so a second tab starting at the same moment
+          // takes this key instead of making another one (two keys = one tab's data unreadable)
+          const fresh = await bundleWithoutLock(prefix, device, await createDataKey());
+          const result = await environment.updateBundle((stored) =>
+            stored === undefined ? fresh : undefined,
+          );
+          const now = parseBundle(prefix, result.value, minRounds);
+          if (!now) return { kind: 'error', error: texts.keyDamaged };
+          bundle = now;
         } else bundle = read;
         if (bundle.kind === 'password') return { kind: 'locked' };
         const data = await openBundle(prefix, device, bundle);
@@ -363,7 +450,7 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
           try {
             await environment.writeBlob(name, await sealPiece(prefix, o.data, slot, bytes));
           } catch (error) {
-            throw new Error(texts.notSaved(message(error)));
+            throw new Error(texts.notSaved(message(error)), { cause: error });
           }
         })(),
       );
@@ -390,6 +477,13 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       return (await environment.listBlobs()).filter((n) => n.startsWith(startsWith));
     },
 
+    async listBytesInfo(startsWith = '') {
+      requireOpen();
+      return (await environment.listBlobInfo())
+        .filter((b) => b.name.startsWith(startsWith))
+        .map((b) => ({ name: b.name, size: Math.max(0, b.stored - GCM_TAG) }));
+    },
+
     onError(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -400,26 +494,24 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
     },
 
     async startAnew() {
+      // First stop everything that could still write: the pending slot values go, the open state
+      // goes (a write that is just being sealed sees it and drops its value), then wait for it.
+      waiting.clear();
+      opened = undefined;
+      loggedUser = undefined;
+      await (running ?? Promise.resolve());
+      await Promise.all([...writing]);
+      for (const slot of config.slots) environment.remove(name(slot));
+      await environment.clearBlobs();
       if (usersMode) {
-        for (const slot of config.slots) environment.remove(name(slot));
-        await Promise.all([...writing]);
-        await environment.clearBlobs();
         await environment.clearBundle();
-        waiting.clear();
-        opened = undefined;
         ring = undefined;
-        loggedUser = undefined;
         damaged = false;
         return;
       }
       const d = device ?? (await environment.deviceKey());
-      for (const slot of config.slots) environment.remove(name(slot));
-      await Promise.all([...writing]);
-      await environment.clearBlobs();
       const fresh = await bundleWithoutLock(prefix, d, await createDataKey());
       await environment.writeBundle(fresh);
-      waiting.clear();
-      opened = undefined;
       device = d;
       bundle = fresh;
     },
@@ -428,7 +520,12 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       const o = requireOpen();
       if (usersMode || !o.device) return texts.notDeviceMode;
       const dk = o.device;
-      return rewrap((d) => bundleWithLock(prefix, dk, d, password, rounds), current);
+      const bad = roundsProblem(rounds);
+      if (bad) return bad;
+      return rewrap(
+        (d) => bundleWithLock(prefix, dk, d, password, roundsOf(rounds), minRounds),
+        current,
+      );
     },
 
     async removeLock(current) {
@@ -447,18 +544,21 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       if (!isUserName(user)) return { kind: 'error', error: texts.invalidUser };
       const weak = checkPassword(passphrase, passphrase, texts);
       if (weak) return { kind: 'error', error: weak };
+      const bad = roundsProblem(rounds);
+      if (bad) return { kind: 'error', error: bad };
       try {
         const entry = await createUserEntry(
           prefix,
           user,
           passphrase,
           await createDataKey(),
-          rounds,
+          roundsOf(rounds),
+          minRounds,
         );
-        const problem = await writeRing([entry]);
+        const problem = await createRing(entry);
         if (problem) return { kind: 'error', error: problem };
         const data = await openUserEntry(prefix, entry, passphrase);
-        return data ? openUsers(data, user) : { kind: 'error', error: texts.keyMismatch };
+        return data ? openUsers(data, entry.user) : { kind: 'error', error: texts.keyMismatch };
       } catch (error) {
         return { kind: 'error', error: texts.storageUnreachable(message(error)) };
       }
@@ -467,59 +567,94 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
     async loginUser(user, passphrase) {
       needUsers();
       if (!ring) return { kind: 'error', error: texts.notStarted };
-      const entry = ring.entries.find((e) => e.user === user);
+      const entry = ring.entries.find((e) => sameUser(e.user, user));
       if (!entry) return false;
       const data = await openUserEntry(prefix, entry, passphrase);
-      return data ? openUsers(data, user) : false;
+      return data ? openUsers(data, entry.user) : false;
     },
 
     currentUser: () => (opened ? loggedUser : undefined),
     users: () => ring?.entries.map((e) => e.user) ?? [],
 
-    async addUser(user, passphrase, by, rounds) {
+    addUser(user, passphrase, by, rounds) {
       needUsers();
       requireOpen();
-      if (!ring) return texts.notStarted;
-      if (!isUserName(user)) return texts.invalidUser;
-      if (ring.entries.some((e) => e.user === user)) return texts.userExists;
-      const weak = checkPassword(passphrase, passphrase, texts);
-      if (weak) return weak;
-      const own = ring.entries.find((e) => e.user === by.user);
-      const data = own && (await openUserEntry(prefix, own, by.passphrase, true));
-      if (!data) return texts.wrongCurrentPassword;
-      return writeRing([
-        ...ring.entries,
-        await createUserEntry(prefix, user, passphrase, data, rounds),
-      ]);
+      return serial(async () => {
+        if (!ring) return texts.notStarted;
+        if (!isUserName(user)) return texts.invalidUser;
+        if (ring.entries.some((e) => sameUser(e.user, user))) return texts.userExists;
+        const weak = checkPassword(passphrase, passphrase, texts);
+        if (weak) return weak;
+        const bad = roundsProblem(rounds);
+        if (bad) return bad;
+        const own = ring.entries.find((e) => sameUser(e.user, by.user));
+        const data = own && (await openUserEntry(prefix, own, by.passphrase, true));
+        if (!own || !data) return texts.wrongCurrentPassword;
+        const entry = await createUserEntry(
+          prefix,
+          user,
+          passphrase,
+          data,
+          roundsOf(rounds),
+          minRounds,
+        );
+        return changeRing((current) => {
+          if (current.entries.some((e) => sameUser(e.user, user))) return texts.userExists;
+          // the one who vouches must still be there (another tab may have removed him)
+          if (!current.entries.some((e) => e.user === own.user)) return texts.ringChanged;
+          return [...current.entries, entry];
+        });
+      });
     },
 
-    async removeUser(user) {
+    removeUser(user) {
       needUsers();
       requireOpen();
-      if (!ring) return texts.notStarted;
-      if (user === loggedUser) return texts.cannotRemoveSelf;
-      if (!ring.entries.some((e) => e.user === user)) return texts.unknownUser;
-      if (ring.entries.length <= 1) return texts.lastUser;
-      return writeRing(ring.entries.filter((e) => e.user !== user));
+      return serial(async () => {
+        if (!ring) return texts.notStarted;
+        if (loggedUser !== undefined && sameUser(user, loggedUser)) return texts.cannotRemoveSelf;
+        return changeRing((current) => {
+          if (!current.entries.some((e) => sameUser(e.user, user))) return texts.unknownUser;
+          if (current.entries.length <= 1) return texts.lastUser;
+          return current.entries.filter((e) => !sameUser(e.user, user));
+        });
+      });
     },
 
-    async changeUserPassphrase(user, current, next, rounds) {
+    changeUserPassphrase(user, current, next, rounds) {
       needUsers();
       requireOpen();
-      if (!ring) return texts.notStarted;
-      if (user !== loggedUser) return texts.unknownUser;
-      const weak = checkPassword(next, next, texts);
-      if (weak) return weak;
-      const own = ring.entries.find((e) => e.user === user);
-      const data = own && (await openUserEntry(prefix, own, current, true));
-      if (!data) return texts.wrongCurrentPassword;
-      const fresh = await createUserEntry(prefix, user, next, data, rounds);
-      return writeRing(ring.entries.map((e) => (e.user === user ? fresh : e)));
+      return serial(async () => {
+        if (!ring) return texts.notStarted;
+        if (loggedUser === undefined || !sameUser(user, loggedUser)) return texts.unknownUser;
+        const weak = checkPassword(next, next, texts);
+        if (weak) return weak;
+        const bad = roundsProblem(rounds);
+        if (bad) return bad;
+        const own = ring.entries.find((e) => sameUser(e.user, user));
+        const data = own && (await openUserEntry(prefix, own, current, true));
+        if (!own || !data) return texts.wrongCurrentPassword;
+        const fresh = await createUserEntry(
+          prefix,
+          own.user,
+          next,
+          data,
+          roundsOf(rounds),
+          minRounds,
+        );
+        return changeRing((stored) => {
+          const mine = stored.entries.find((e) => e.user === own.user);
+          if (!mine) return texts.unknownUser;
+          // changed elsewhere meanwhile (another tab set a passphrase): never overwrite it blindly
+          if (mine.iv !== own.iv || mine.ct !== own.ct) return texts.ringChanged;
+          return stored.entries.map((e) => (e === mine ? fresh : e));
+        });
+      });
     },
 
     userEntry(user) {
       needUsers();
-      const entry = ring?.entries.find((e) => e.user === user);
+      const entry = ring?.entries.find((e) => sameUser(e.user, user));
       return entry ? userEntryToText(prefix, entry) : undefined;
     },
 
@@ -527,11 +662,11 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
       needUsers();
       if (ring) return { kind: 'error', error: texts.alreadySetUp };
       if (damaged) return { kind: 'error', error: texts.keyDamaged };
-      const entry = userEntryFromText(prefix, text);
+      const entry = userEntryFromText(prefix, text, minRounds);
       if (!entry) return { kind: 'error', error: texts.entryUnreadable };
       const data = await openUserEntry(prefix, entry, passphrase);
       if (!data) return false;
-      const problem = await writeRing([entry]);
+      const problem = await createRing(entry);
       return problem ? { kind: 'error', error: problem } : openUsers(data, entry.user);
     },
   };

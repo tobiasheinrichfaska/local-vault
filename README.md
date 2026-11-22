@@ -48,6 +48,7 @@ to their name, each call going to the storage:
 await vault.putBytes('file:ab12', bytes); // resolves when stored, rejects with the reason
 const back = await vault.getBytes('file:ab12'); // Uint8Array | undefined; throws if it cannot be opened
 await vault.listBytes('file:'); // sorted names, optionally those starting so
+await vault.listBytesInfo('file:'); // [{ name, size }] — size in plain bytes
 await vault.removeBytes('file:ab12');
 ```
 
@@ -55,10 +56,17 @@ Names: lower case, digits and `. _ : / -`, up to 200 characters (`isBlobName`). 
 blobs on their way too; "start anew" removes them with the slots. An existing version 1 database is
 upgraded in place (the key bundle and the device key stay).
 
+A full storage reaches the app as a rejected `putBytes` whose `error.cause` is the browser's own error:
+`isQuotaError(error)` tells it. `storageEstimate()` (`{ usage, quota }` of the whole site, or `undefined`)
+and `requestPersistence()` (ask the browser not to clear the site's data; `false` if refused or
+unavailable) wrap `navigator.storage`.
+
 ### Users mode (several people on one device)
 
 `createVault({ prefix, slots, mode: 'users' })` swaps the device lock for a **key ring**: the data key is
-stored only wrapped by a key from each user's passphrase (PBKDF2, 600 000 rounds), one entry per user.
+stored only wrapped by a key from each user's passphrase (PBKDF2, 600 000 rounds by default; whole
+numbers from 100 000 to 3 000 000 are taken, written or read — `minRounds` in the configuration lowers
+the lower end, tests only), one entry per user. User names are stored NFC-normalised.
 Nothing opens without a login; the device key plays no part. The gate shows a set-up (first user) and a
 login (user + passphrase); `LockSettings` renders nothing in this mode.
 
