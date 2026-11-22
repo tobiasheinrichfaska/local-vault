@@ -144,12 +144,13 @@ describe('the app lock', () => {
     const vault = make(env);
     await vault.startVault();
     let reloaded = false;
+    let openAtReload: boolean | undefined;
     const previous = (globalThis as { location?: unknown }).location;
     (globalThis as { location?: unknown }).location = {
       reload: () => {
         reloaded = true;
         // closed first (the keys left the memory), and the write was stored before the reload
-        expect(vault.isVaultOpen()).toBe(false);
+        openAtReload = vault.isVaultOpen();
         expect(env.raw.has(KEY)).toBe(true);
       },
     };
@@ -159,6 +160,7 @@ describe('the app lock', () => {
       await vault.saved();
       await new Promise((r) => setTimeout(r, 0));
       expect(reloaded).toBe(true);
+      expect(openAtReload).toBe(false);
     } finally {
       (globalThis as { location?: unknown }).location = previous;
     }

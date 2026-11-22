@@ -16,6 +16,8 @@ Status 2026-11-21: the logic and the first render are covered by tests; the brow
 | Path | Impact | Audit Check |
 |---|---|---|
 | Closed vault throws on read/write | an empty value would be saved over real data | `tests/io/vault.test.ts` |
+| `close()` stores what is on its way, then drops key and data; nothing opens without unlock/login | locking without a reload must not lose a write or leave the key in use | `tests/io/close.test.ts` |
+| `sweepBlobs()` never removes a valid or in-progress blob | data loss in the blob store | `tests/io/sweep.test.ts` |
 | Store names start with the prefix | collisions with other apps on the same origin | `tests/io/config.test.ts` |
 | Config and texts passed in | the package is useless to a second app otherwise | `tests/ui/coupling.test.ts` |
 | Key survives a reload on a phone | data lost without warning | device test (`manual_tests/`) |
