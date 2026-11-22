@@ -203,9 +203,9 @@ describe('an open database held by another tab', () => {
       r.onerror = () => fail(r.error);
     });
     const env = browserEnvironment(prefix);
-    await expect(env.listBlobs()).rejects.toThrow(/in use by another tab/);
+    await expect(env.listBlobKeys()).rejects.toThrow(/in use by another tab/);
     old.close();
     await new Promise((r) => setTimeout(r, 20)); // the pending upgrade finishes and is closed again
-    expect(await env.listBlobs()).toEqual([]);
+    expect(await env.listBlobKeys()).toEqual([]);
   });
 });

@@ -50,7 +50,14 @@ const back = await vault.getBytes('file:ab12'); // Uint8Array | undefined; throw
 await vault.listBytes('file:'); // sorted names, optionally those starting so
 await vault.listBytesInfo('file:'); // [{ name, size }] — size in plain bytes
 await vault.removeBytes('file:ab12');
+for await (const block of vault.getBytesChunks('file:ab12')) write(block); // block by block, not whole in memory
 ```
+
+A blob is cut into blocks (`blobChunkSize` in the configuration, default 2 MiB), each encrypted with its
+own IV and bound to the blob name, the write, its index and the number of blocks; a small sealed head says
+which blocks belong. A write is atomic — an error (full storage) or an interrupted write leaves the old
+content — and a block that is missing, moved, changed or from another write makes `getBytes` throw.
+Peak memory is the bytes plus about three blocks. Blobs of the earlier one-piece format stay readable.
 
 Names: lower case, digits and `. _ : / -`, up to 200 characters (`isBlobName`). `saved()` waits for
 blobs on their way too; "start anew" removes them with the slots. An existing version 1 database is

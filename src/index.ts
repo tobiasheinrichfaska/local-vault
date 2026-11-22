@@ -7,6 +7,7 @@ export {
   guardEnvironment,
   memoryEnvironment,
   type BundleUpdate,
+  type StoredBlob,
   type VaultEnvironment,
 } from './io/environment.ts';
 export {
@@ -31,6 +32,8 @@ export {
   type VaultConfig,
 } from './logic/config.ts';
 export { DEFAULT_TEXTS, resolveTexts, type VaultTexts } from './logic/texts.ts';
+
+export { DEFAULT_BLOB_CHUNK, MAX_BLOB_CHUNK, checkChunkSize } from './logic/blobs.ts';
 
 // Logic: crypto pieces (the prefix is the app's)
 export {

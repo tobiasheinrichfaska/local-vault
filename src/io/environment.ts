@@ -3,7 +3,16 @@
 // app's prefix is ever touched.
 import { databaseName, hasPrefix } from '../logic/config.ts';
 import { DEFAULT_TEXTS, type VaultTexts } from '../logic/texts.ts';
+import { CHUNK_MARK } from '../logic/blobs.ts';
 import { createDeviceKey, type Bundle, type Piece, type UsersBundle } from '../logic/vault.ts';
+
+/**
+ * A record of the blob store: `{iv, ct}` as the earlier one-piece blob and the blocks, `v` set on the
+ * head of a blob in blocks (the earlier format has none). Which key holds which is the vault's business.
+ */
+export interface StoredBlob extends Piece {
+  readonly v?: number;
+}
 
 /** What `updateBundle` found and did. */
 export interface BundleUpdate {
@@ -33,17 +42,21 @@ export interface VaultEnvironment {
   write(name: string, value: string): void;
   remove(name: string): void;
   /**
-   * Blobs: encrypted pieces under free names (`vault.putBytes`), kept in IndexedDB — no size limit
-   * of localStorage's kind, no text round trip. The name is whatever the vault validated.
+   * Blobs: encrypted records under keys, kept in IndexedDB — no size limit of localStorage's kind, no
+   * text round trip. A key is a blob name (the head, or the whole blob of the earlier format) or a block
+   * key, which starts with `CHUNK_MARK` (`~`) and so sorts after every blob name. Keys are whatever the
+   * vault validated.
    */
-  readBlob(name: string): Promise<Piece | undefined>;
-  writeBlob(name: string, piece: Piece): Promise<void>;
-  removeBlob(name: string): Promise<void>;
-  /** Every blob name, sorted. */
-  listBlobs(): Promise<string[]>;
-  /** Every blob name, sorted, with the length of its stored (encrypted) bytes. */
-  listBlobInfo(): Promise<{ name: string; stored: number }[]>;
-  /** Removes every blob (start anew: they would be unreadable under a new data key). */
+  readBlob(key: string): Promise<StoredBlob | undefined>;
+  writeBlob(key: string, record: StoredBlob): Promise<void>;
+  removeBlob(key: string): Promise<void>;
+  /** Removes these keys in one step (missing ones are fine). */
+  removeBlobs(keys: readonly string[]): Promise<void>;
+  /** Every key (blob names and block keys) starting with `prefix`, sorted — keys only, no values read. */
+  listBlobKeys(prefix?: string): Promise<string[]>;
+  /** Every blob name (no block key), sorted, with its record: the head, or the whole piece of the earlier format. */
+  listBlobHeads(): Promise<{ name: string; record: StoredBlob }[]>;
+  /** Removes every record (start anew: they would be unreadable under a new data key). */
   clearBlobs(): Promise<void>;
 }
 
@@ -161,48 +174,62 @@ export function browserEnvironment(
     read: (name) => localStorage.getItem(name),
     write: (name, value) => localStorage.setItem(name, value),
     remove: (name) => localStorage.removeItem(name),
-    async readBlob(name) {
+    async readBlob(key) {
       let value: unknown;
       await idb(
         'readonly',
         (store) => {
-          const request = store.get(name);
+          const request = store.get(key);
           request.onsuccess = () => (value = request.result);
         },
         BLOBS,
       );
-      return isPiece(value) ? value : undefined;
+      return isRecord(value) ? value : undefined;
     },
-    async writeBlob(name, piece) {
-      await idb('readwrite', (store) => store.put({ iv: piece.iv, ct: piece.ct }, name), BLOBS);
+    async writeBlob(key, record) {
+      const stored = record.v === undefined ? { iv: record.iv, ct: record.ct } : { ...record };
+      await idb('readwrite', (store) => store.put(stored, key), BLOBS);
     },
-    async removeBlob(name) {
-      await idb('readwrite', (store) => store.delete(name), BLOBS);
+    async removeBlob(key) {
+      await idb('readwrite', (store) => store.delete(key), BLOBS);
     },
-    async listBlobs() {
-      let names: IDBValidKey[] = [];
+    async removeBlobs(keys) {
+      if (keys.length === 0) return;
       await idb(
-        'readonly',
+        'readwrite',
         (store) => {
-          const request = store.getAllKeys();
-          request.onsuccess = () => (names = request.result);
+          for (const key of keys) store.delete(key);
         },
         BLOBS,
       );
-      return names.filter((n): n is string => typeof n === 'string').sort();
     },
-    async listBlobInfo() {
-      const found: { name: string; stored: number }[] = [];
+    async listBlobKeys(prefix = '') {
+      let keys: IDBValidKey[] = [];
       await idb(
         'readonly',
         (store) => {
-          const request = store.openCursor();
+          const request = store.getAllKeys(
+            prefix === '' ? undefined : IDBKeyRange.bound(prefix, `${prefix}\uffff`),
+          );
+          request.onsuccess = () => (keys = request.result);
+        },
+        BLOBS,
+      );
+      return keys.filter((k): k is string => typeof k === 'string').sort();
+    },
+    async listBlobHeads() {
+      const found: { name: string; record: StoredBlob }[] = [];
+      await idb(
+        'readonly',
+        (store) => {
+          // blob names all sort before the block keys: only that range is read, no block is loaded
+          const request = store.openCursor(IDBKeyRange.upperBound(CHUNK_MARK, true));
           request.onsuccess = () => {
             const cursor = request.result;
             if (!cursor) return;
             const value: unknown = cursor.value;
-            if (typeof cursor.key === 'string' && isPiece(value)) {
-              found.push({ name: cursor.key, stored: value.ct.byteLength });
+            if (typeof cursor.key === 'string' && isRecord(value)) {
+              found.push({ name: cursor.key, record: value });
             }
             cursor.continue();
           };
@@ -217,21 +244,22 @@ export function browserEnvironment(
   };
 }
 
-const isPiece = (v: unknown): v is Piece =>
+const isRecord = (v: unknown): v is StoredBlob =>
   typeof v === 'object' &&
   v !== null &&
   (v as Piece).iv instanceof Uint8Array &&
-  (v as Piece).ct instanceof Uint8Array;
+  (v as Piece).ct instanceof Uint8Array &&
+  ((v as StoredBlob).v === undefined || typeof (v as StoredBlob).v === 'number');
 
 /** Tests: a vault in memory. */
 export function memoryEnvironment(): VaultEnvironment & {
   /** As localStorage. */
   readonly raw: Map<string, string>;
-  /** As the IndexedDB store of blobs. */
-  readonly blobs: Map<string, Piece>;
+  /** As the IndexedDB store of blobs (heads, blocks, old pieces). */
+  readonly blobs: Map<string, StoredBlob>;
 } {
   const raw = new Map<string, string>();
-  const blobs = new Map<string, Piece>();
+  const blobs = new Map<string, StoredBlob>();
   let key: Promise<CryptoKey> | undefined;
   let storedBundle: unknown;
   return {
@@ -250,13 +278,16 @@ export function memoryEnvironment(): VaultEnvironment & {
     read: (s) => raw.get(s) ?? null,
     write: (s, v) => void raw.set(s, v),
     remove: (s) => void raw.delete(s),
-    readBlob: async (n) => blobs.get(n),
-    writeBlob: async (n, p) => void blobs.set(n, p),
-    removeBlob: async (n) => void blobs.delete(n),
-    listBlobs: async () => [...blobs.keys()].sort(),
-    listBlobInfo: async () =>
+    readBlob: async (k) => blobs.get(k),
+    writeBlob: async (k, r) => void blobs.set(k, r),
+    removeBlob: async (k) => void blobs.delete(k),
+    removeBlobs: async (keys) => void keys.forEach((k) => blobs.delete(k)),
+    listBlobKeys: async (prefix = '') =>
+      [...blobs.keys()].filter((k) => k.startsWith(prefix)).sort(),
+    listBlobHeads: async () =>
       [...blobs]
-        .map(([name, piece]) => ({ name, stored: piece.ct.byteLength }))
+        .filter(([k]) => !k.startsWith(CHUNK_MARK))
+        .map(([name, record]) => ({ name, record }))
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
     clearBlobs: async () => blobs.clear(),
   };
@@ -280,11 +311,12 @@ export function guardEnvironment(prefix: string, env: VaultEnvironment): VaultEn
     write: (name, value) => env.write(check(name), value),
     remove: (name) => env.remove(check(name)),
     // blobs live in the database `<prefix>-vault`, which is the prefix's own
-    readBlob: (name) => env.readBlob(name),
-    writeBlob: (name, piece) => env.writeBlob(name, piece),
-    removeBlob: (name) => env.removeBlob(name),
-    listBlobs: () => env.listBlobs(),
-    listBlobInfo: () => env.listBlobInfo(),
+    readBlob: (key) => env.readBlob(key),
+    writeBlob: (key, record) => env.writeBlob(key, record),
+    removeBlob: (key) => env.removeBlob(key),
+    removeBlobs: (keys) => env.removeBlobs(keys),
+    listBlobKeys: (prefix) => env.listBlobKeys(prefix),
+    listBlobHeads: () => env.listBlobHeads(),
     clearBlobs: () => env.clearBlobs(),
   };
 }

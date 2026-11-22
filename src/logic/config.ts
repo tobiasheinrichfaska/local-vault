@@ -1,5 +1,6 @@
 // The app's configuration of its vault: the name prefix and the slots. Every storage name the
 // package uses (localStorage key, IndexedDB database, stored markers) starts with `<prefix>-`.
+import { checkChunkSize } from './blobs.ts';
 import type { VaultTexts } from './texts.ts';
 import { checkRounds } from './vault.ts';
 
@@ -19,6 +20,11 @@ export interface VaultConfig {
    * `DEFAULT_MIN_ROUNDS`, 100 000). Lower it only for tests; production leaves it out.
    */
   readonly minRounds?: number;
+  /**
+   * Plain bytes per block of a blob (default `DEFAULT_BLOB_CHUNK`, 2 MiB; 1 … `MAX_BLOB_CHUNK`). Only
+   * new writes use it — a stored blob keeps the block size it was written with and reads under any value.
+   */
+  readonly blobChunkSize?: number;
   /** Replaces any of the English default texts. */
   readonly texts?: Partial<VaultTexts>;
 }
@@ -33,6 +39,9 @@ export function validateConfig(config: VaultConfig): void {
   }
   if (config.minRounds !== undefined && !checkRounds(config.minRounds, 1)) {
     throw new Error(`Invalid minRounds: "${String(config.minRounds)}"`);
+  }
+  if (config.blobChunkSize !== undefined && !checkChunkSize(config.blobChunkSize)) {
+    throw new Error(`Invalid blobChunkSize: "${String(config.blobChunkSize)}"`);
   }
   if (config.slots.length === 0) throw new Error('A vault needs at least one slot');
   const seen = new Set<string>();
