@@ -97,3 +97,7 @@ The German strings of the original now belong to the app (its `VAULT_TEXTS`). Fi
 - **Blobs:** `vault.putBytes/getBytes/removeBytes/listBytes` (`io/vault.ts`), `isBlobName`
   (`logic/config.ts`), and `readBlob/writeBlob/removeBlob/listBlobs/clearBlobs` on
   `VaultEnvironment` (`io/environment.ts`; IndexedDB store `blobs`, database version 2).
+- **Users mode:** `config.mode` (`'device'` default, `'users'`), `StartResult` kind `setup`, and
+  on `Vault` `setupFirstUser`, `loginUser`, `currentUser`, `users`, `addUser`, `removeUser`,
+  `changeUserPassphrase`, `userEntry`, `joinWithEntry`; crypto pieces `createUserEntry`,
+  `openUserEntry`, `parseUsersBundle`, `userEntryToText`/`userEntryFromText` (`logic/vault.ts`).

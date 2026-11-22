@@ -99,6 +99,7 @@ npm run build
   extractable for a moment (the logged-in user's passphrase is asked again); the passphrase rules are the
   app's (the package only refuses under 6 characters); no limit of failed logins (the app or a server
   does that); an entry swapped to another user name does not open (the name is authenticated data).
+- **Removing a user does not rotate the data key (2026-11-22):** `removeUser` only drops his entry from the ring; the data key stays the same, so a copy of his entry (for example one kept on a server) still opens the data with his passphrase. Treat a removed user as having had access, or "start anew".
 - **Not consumed by any app from a Git tag yet**; not published to npm; no tag.
 - The prefix is part of the encrypted data: changing it makes old data unreadable.
 - The re-lock after 5 minutes (`LOCK_AFTER_MINUTES`) is fixed, not configurable.
