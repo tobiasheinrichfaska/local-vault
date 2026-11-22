@@ -33,3 +33,8 @@ export const databaseName = (prefix: string): string => `${prefix}-vault`;
 
 /** Whether a store name belongs to this vault. */
 export const hasPrefix = (prefix: string, name: string): boolean => name.startsWith(`${prefix}-`);
+
+const BLOB_NAME = /^[a-z0-9][a-z0-9._:/-]{0,199}$/;
+
+/** Whether a name is allowed for a blob: lower case, digits and `. _ : / -`, up to 200 characters. */
+export const isBlobName = (name: string): boolean => BLOB_NAME.test(name);

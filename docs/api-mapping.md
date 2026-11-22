@@ -91,3 +91,9 @@ The German strings of the original now belong to the app (its `VAULT_TEXTS`). Fi
 `notSavedUnreadable`, `notSaved(reason)`, `dataUnreadable`, `keyDamaged`, `keyMismatch`,
 `storageUnreachable(reason)`, `wrongCurrentPassword`, `passwordTooShort(min)`, `passwordsDiffer`,
 `indexedDbUnavailable`, `vaultUnreachable`, `vaultNotStored`.
+
+## Additions after the extraction (no old name)
+
+- **Blobs:** `vault.putBytes/getBytes/removeBytes/listBytes` (`io/vault.ts`), `isBlobName`
+  (`logic/config.ts`), and `readBlob/writeBlob/removeBlob/listBlobs/clearBlobs` on
+  `VaultEnvironment` (`io/environment.ts`; IndexedDB store `blobs`, database version 2).
