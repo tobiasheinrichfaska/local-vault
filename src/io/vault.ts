@@ -2,6 +2,21 @@
 // the opened slots, and writes every change encrypted. A slot that cannot be opened (other key,
 // damaged — or plain: no way back to unencrypted) is never overwritten: writing to it is refused
 // and the reason shown. Each `createVault` call has its own state.
+import {
+  DEFAULT_BLOB_CHUNK,
+  HEAD_VERSION,
+  blocksFor,
+  chunkKey,
+  chunkLength,
+  chunkPrefix,
+  chunkSlot,
+  headFromBytes,
+  headSlot,
+  headToBytes,
+  legacySlot,
+  newGeneration,
+  type BlobHead,
+} from '../logic/blobs.ts';
 import { isBlobName, storageName, validateConfig, type VaultConfig } from '../logic/config.ts';
 import { resolveTexts, type VaultTexts } from '../logic/texts.ts';
 import {
@@ -32,7 +47,12 @@ import {
   sealText,
   type Bundle,
 } from '../logic/vault.ts';
-import { browserEnvironment, guardEnvironment, type VaultEnvironment } from './environment.ts';
+import {
+  browserEnvironment,
+  guardEnvironment,
+  type StoredBlob,
+  type VaultEnvironment,
+} from './environment.ts';
 
 export type StartResult =
   | { readonly kind: 'open' }
@@ -104,23 +124,42 @@ export interface Vault {
   writeSlot(slot: string, value: string): string | undefined;
   // Blobs: encrypted bytes under free names (lower case, digits and `. _ : / -`, up to 200
   // characters) in IndexedDB, for what is too large or too many for slots (documents, blocks of a
-  // big state). Each blob is bound to its name, so none can be swapped for another. Unlike slots
-  // they are not held in memory: every call goes to the storage. They stay apart from the slots
-  // (a slot name has no `:`), and "start anew" removes them with the slots. All of them throw
-  // while the vault is closed.
+  // big state). A blob is cut into blocks (`config.blobChunkSize`), each sealed on its own with its own
+  // IV and bound to the blob name, the write, its index and the number of blocks; a small sealed head
+  // under the name says which blocks belong. A write is atomic: blocks first, then the head is
+  // switched in one step, then the old blocks go — a failed or interrupted write leaves the old
+  // content. Blobs of the earlier format (one piece) stay readable and are replaced on the next put.
+  // Unlike slots they are not held in memory: every call goes to the storage. They stay apart from
+  // the slots (a slot name has no `:`), and "start anew" removes them with the slots. All of them
+  // throw while the vault is closed. Calls on one name run one after another (per vault instance).
   /**
-   * Stores the bytes encrypted; resolves when stored, rejects when the browser does not store them.
-   * The browser's own error stays as `error.cause` (`isQuotaError(error)` tells a full storage).
+   * Stores the bytes encrypted; resolves when stored, rejects when the browser does not store them
+   * (the old content is then still there). The browser's own error stays as `error.cause`
+   * (`isQuotaError(error)` tells a full storage). While writing, the storage holds old and new
+   * content; in memory, besides the given bytes, about three blocks.
    */
   putBytes(name: string, bytes: Uint8Array): Promise<void>;
-  /** The bytes, undefined when there is no such blob; throws for one that cannot be opened. */
+  /**
+   * The bytes, undefined when there is no such blob; throws for one that cannot be opened (a block
+   * missing, changed, moved or from another write). Peak memory: the result plus about three blocks.
+   */
   getBytes(name: string): Promise<Uint8Array | undefined>;
+  /**
+   * The same blob block by block (an old one-piece blob comes as one piece), for a large file that
+   * should not be held whole in memory. Every block is checked before it is given, but whether the
+   * blob is complete is only known at the end: the iteration throws at a missing or changed block —
+   * discard what was taken before then. Nothing is given for a missing blob. Not serialised with
+   * writes to the same name: an overwrite meanwhile makes it throw, never give a mixture.
+   */
+  getBytesChunks(name: string): AsyncIterable<Uint8Array>;
+  /** Removes the blob (head and blocks, also blocks left over by an interrupted write). */
   removeBytes(name: string): Promise<void>;
   /** Names of all blobs, sorted; with `startsWith` only those beginning so. */
   listBytes(startsWith?: string): Promise<string[]>;
   /**
    * Names of all blobs with their size in bytes (the plain bytes, not the encrypted ones), sorted;
-   * with `startsWith` only those beginning so. For showing what takes the room.
+   * with `startsWith` only those beginning so. For showing what takes the room. A blob whose head
+   * cannot be opened is listed with size 0.
    */
   listBytesInfo(startsWith?: string): Promise<{ name: string; size: number }[]>;
   /** Resolves when everything written so far (slots and blobs) is stored. */
@@ -336,8 +375,100 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
     if (!isBlobName(name)) throw new Error(`Invalid blob name: "${name}"`);
     return name;
   };
-  // the piece is bound to this name (never to a slot's: a slot name has no colon)
-  const blobSlot = (name: string) => `blob:${blobName(name)}`;
+  const chunkSize = config.blobChunkSize ?? DEFAULT_BLOB_CHUNK;
+
+  // Calls on one blob name run one after another: a write that sweeps the old blocks must not meet a
+  // second write of the same name (whose fresh blocks it would take for old ones) or a reader.
+  const queues = new Map<string, Promise<unknown>>();
+  function perName<T>(name: string, work: () => Promise<T>): Promise<T> {
+    const run = (queues.get(name) ?? Promise.resolve()).then(work, work);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    queues.set(name, tail);
+    void tail.then(() => {
+      if (queues.get(name) === tail) queues.delete(name);
+    });
+    return run;
+  }
+
+  const unreadable = () => new Error(texts.slotUnreadable);
+
+  /** The head of a blob in blocks, opened; throws for anything that is not a head of this name. */
+  async function openHead(data: CryptoKey, name: string, record: StoredBlob): Promise<BlobHead> {
+    if (record.v !== HEAD_VERSION) throw unreadable();
+    const plain = await openPiece(prefix, data, headSlot(name), record);
+    const head = plain && headFromBytes(plain);
+    if (!head) throw unreadable();
+    return head;
+  }
+
+  /** The blocks of a blob in order, each checked (name, write, index, count, length) before it is given. */
+  async function* blocks(
+    data: CryptoKey,
+    name: string,
+    head: BlobHead,
+  ): AsyncGenerator<Uint8Array> {
+    for (let index = 0; index < head.count; index++) {
+      const record = await environment.readBlob(chunkKey(name, head.gen, index));
+      const plain =
+        record &&
+        (await openPiece(prefix, data, chunkSlot(name, head.gen, index, head.count), record));
+      if (!plain || plain.length !== chunkLength(head, index)) throw unreadable();
+      yield plain;
+    }
+  }
+
+  async function* readChunks(data: CryptoKey, name: string): AsyncGenerator<Uint8Array> {
+    const record = await environment.readBlob(name);
+    if (!record) return;
+    if (record.v === undefined) {
+      // the earlier format: one piece bound to `blob:<name>`
+      const plain = await openPiece(prefix, data, legacySlot(name), record);
+      if (!plain) throw unreadable();
+      yield plain;
+      return;
+    }
+    yield* blocks(data, name, await openHead(data, name, record));
+  }
+
+  async function writeBlocks(data: CryptoKey, name: string, bytes: Uint8Array) {
+    const gen = newGeneration();
+    const count = blocksFor(bytes.length, chunkSize);
+    const written: string[] = [];
+    try {
+      for (let index = 0; index < count; index++) {
+        const part = bytes.subarray(index * chunkSize, (index + 1) * chunkSize);
+        const { iv, ct } = await sealPiece(prefix, data, chunkSlot(name, gen, index, count), part);
+        const key = chunkKey(name, gen, index);
+        written.push(key); // before the write: a half-written block is cleaned up too
+        await environment.writeBlob(key, { iv, ct });
+      }
+      const head: BlobHead = { gen, count, size: bytes.length, chunk: chunkSize };
+      const sealed = await sealPiece(prefix, data, headSlot(name), headToBytes(head));
+      // the one step that switches from the old content to the new
+      await environment.writeBlob(name, { v: HEAD_VERSION, iv: sealed.iv, ct: sealed.ct });
+    } catch (error) {
+      try {
+        await environment.removeBlobs(written);
+      } catch {
+        // left over blocks belong to no head; the next write or remove of this name sweeps them
+      }
+      throw error;
+    }
+    // the old content is gone from now on: sweep its blocks (and any leftovers); a failure here is
+    // harmless — the blocks belong to no head
+    try {
+      const keep = `${chunkPrefix(name)}${gen}#`;
+      const stale = (await environment.listBlobKeys(chunkPrefix(name))).filter(
+        (k) => !k.startsWith(keep),
+      );
+      await environment.removeBlobs(stale);
+    } catch {
+      // see above
+    }
+  }
 
   async function track(write: Promise<void>): Promise<void> {
     const tracked = write.then(
@@ -443,45 +574,80 @@ export function createVault(config: VaultConfig, env?: VaultEnvironment): Vault 
     saved,
 
     async putBytes(name, bytes) {
-      const slot = blobSlot(name);
+      blobName(name);
       const o = requireOpen();
       await track(
-        (async () => {
+        perName(name, async () => {
           try {
-            await environment.writeBlob(name, await sealPiece(prefix, o.data, slot, bytes));
+            await writeBlocks(o.data, name, bytes);
           } catch (error) {
             throw new Error(texts.notSaved(message(error)), { cause: error });
           }
-        })(),
+        }),
       );
     },
 
     async getBytes(name) {
-      const slot = blobSlot(name);
+      blobName(name);
       const o = requireOpen();
-      const piece = await environment.readBlob(name);
-      if (!piece) return undefined;
-      const plain = await openPiece(prefix, o.data, slot, piece);
-      if (!plain) throw new Error(texts.slotUnreadable);
-      return plain;
+      return perName(name, async () => {
+        const record = await environment.readBlob(name);
+        if (!record) return undefined;
+        if (record.v === undefined) {
+          const plain = await openPiece(prefix, o.data, legacySlot(name), record);
+          if (!plain) throw unreadable();
+          return plain;
+        }
+        const head = await openHead(o.data, name, record);
+        const out = new Uint8Array(head.size);
+        let at = 0;
+        for await (const part of blocks(o.data, name, head)) {
+          out.set(part, at);
+          at += part.length;
+        }
+        return out;
+      });
+    },
+
+    getBytesChunks(name) {
+      blobName(name);
+      const o = requireOpen();
+      return readChunks(o.data, name);
     },
 
     async removeBytes(name) {
       blobName(name);
       requireOpen();
-      await track(environment.removeBlob(name));
+      await track(
+        perName(name, async () => {
+          await environment.removeBlob(name); // the head first: no half blob stays readable
+          await environment.removeBlobs(await environment.listBlobKeys(chunkPrefix(name)));
+        }),
+      );
     },
 
     async listBytes(startsWith = '') {
       requireOpen();
-      return (await environment.listBlobs()).filter((n) => n.startsWith(startsWith));
+      return (await environment.listBlobKeys(startsWith)).filter(isBlobName);
     },
 
     async listBytesInfo(startsWith = '') {
-      requireOpen();
-      return (await environment.listBlobInfo())
-        .filter((b) => b.name.startsWith(startsWith))
-        .map((b) => ({ name: b.name, size: Math.max(0, b.stored - GCM_TAG) }));
+      const o = requireOpen();
+      const info: { name: string; size: number }[] = [];
+      for (const { name, record } of await environment.listBlobHeads()) {
+        if (!name.startsWith(startsWith)) continue;
+        let size = 0;
+        if (record.v === undefined) size = Math.max(0, record.ct.byteLength - GCM_TAG);
+        else {
+          try {
+            size = (await openHead(o.data, name, record)).size;
+          } catch {
+            // an unopenable head: listed, size unknown
+          }
+        }
+        info.push({ name, size });
+      }
+      return info;
     },
 
     onError(listener) {

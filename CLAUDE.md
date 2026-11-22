@@ -13,7 +13,7 @@ that opens the vault before the app and locks again after 5 minutes in the backg
 card for the app lock. Extracted 2026-11-21 from the web app where it originated, so that several
 apps can share one implementation. **Status (2026-11-21): ported with an English API and an instance
 API (`createVault`), users mode (key ring) and blobs on `main`, review fixes 2026-11-22 (concurrent
-tabs, PBKDF2 round limits, quota errors), 120 tests; consumed by no app from a Git tag yet, not published to npm.** Old →
+tabs, PBKDF2 round limits, quota errors), 219 tests, blobs in blocks (W4); consumed by no app from a Git tag yet, not published to npm.** Old →
 new names: [`docs/api-mapping.md`](docs/api-mapping.md).
 
 **Platform:** web (IndexedDB, localStorage, Web Crypto; not for React Native native builds)
@@ -36,7 +36,7 @@ data and no app words. Public entry: `src/index.ts`.
 - Every rule keeps its test: a plain value in a slot is not read; an unreadable slot is never
   overwritten; a closed vault throws on read/write; write errors reach `onError`; lock on/off/new
   password leave the data untouched; wrong password refused; the 5-minute re-lock rule; the device
-  key is non-extractable; "start anew" leaves empty data under a new key (blobs removed); a blob is bound to its name and to the data key; a failed blob write rejects, never silently.
+  key is non-extractable; "start anew" leaves empty data under a new key (blobs removed); a blob is bound to its name and to the data key; a failed blob write rejects, never silently. A blob is cut into blocks, each bound to name, write, index and block count; a failed or interrupted write leaves the old content (blocks first, then one head write, then the old blocks go); an old one-piece blob stays readable.
 
 ---
 
@@ -52,8 +52,9 @@ data and no app words. Public entry: `src/index.ts`.
 | `src/index.ts` | Public entry: `createVault`, environments, components, config, texts, crypto pieces |
 | `src/logic/vault.ts`, `base64url.ts` | Crypto pieces: keys, sealed text, bundles, password check, re-lock rule (prefix is the first argument); rounds limits `DEFAULT_MIN_ROUNDS` (100 000) / `MAX_ROUNDS` (3 000 000) / `checkRounds` (written and read alike); users mode: `createUserEntry`, `openUserEntry`, `parseUsersBundle`, `userEntryToText`/`FromText`, `sameUser` (NFC) |
 | `src/logic/config.ts`, `texts.ts` | `VaultConfig` + validation + store names; `VaultTexts` + English `DEFAULT_TEXTS` |
-| `src/io/vault.ts` | `createVault(config, env?)`: the vault instance (`Vault`): slots (text, in memory) and blobs (`putBytes`/`getBytes`/`removeBytes`/`listBytes`/`listBytesInfo`, bytes in IndexedDB); `mode: 'users'` = key ring per user (`setupFirstUser`, `loginUser`, `addUser`, `removeUser`, `changeUserPassphrase`, `userEntry`, `joinWithEntry`) |
-| `src/io/environment.ts` | `VaultEnvironment` (slots in localStorage; keys and blobs in IndexedDB `<prefix>-vault`, version 2), `browserEnvironment(prefix)`, `memoryEnvironment()`, `guardEnvironment` |
+| `src/io/vault.ts` | `createVault(config, env?)`: the vault instance (`Vault`): slots (text, in memory) and blobs (`putBytes`/`getBytes`/`getBytesChunks`/`removeBytes`/`listBytes`/`listBytesInfo`, bytes in IndexedDB, in blocks of `config.blobChunkSize`); `mode: 'users'` = key ring per user (`setupFirstUser`, `loginUser`, `addUser`, `removeUser`, `changeUserPassphrase`, `userEntry`, `joinWithEntry`) |
+| `src/logic/blobs.ts` | Blobs in blocks, pure: `DEFAULT_BLOB_CHUNK` (2 MiB), `MAX_BLOB_CHUNK`, `checkChunkSize`, block keys (`~<name>#<gen>#<i>`, `CHUNK_MARK`), the authenticated data (`chunkSlot`, `headSlot`, `legacySlot`), the head (`BlobHead`, `headToBytes`/`headFromBytes`) |
+| `src/io/environment.ts` | `VaultEnvironment` (slots in localStorage; keys and blobs in IndexedDB `<prefix>-vault`, version 2; blob records `readBlob`/`writeBlob`/`removeBlob(s)`/`listBlobKeys`/`listBlobHeads`/`clearBlobs`), `browserEnvironment(prefix)`, `memoryEnvironment()`, `guardEnvironment` |
 | `src/ui/VaultGate.tsx`, `LockSettings.tsx`, `parts.tsx` | The gate, the lock settings card, shared pieces |
 | `tests/logic/`, `tests/io/`, `tests/ui/` | Unit tests (crypto, vault rules, config/prefix, two instances), `renderToString` smoke tests, coupling guard (no app words, no foreign imports) |
 | `scripts/fix-declarations.mjs` | Rewrites `.ts`/`.tsx` imports in the emitted `.d.ts` files |
@@ -68,9 +69,14 @@ data and no app words. Public entry: `src/index.ts`.
 
 No persisted data of its own beyond what the app puts into its slots; the stored shapes are the
 sealed text `{"m":"<prefix>-vault:1","iv":…,"ct":…}`, the key ring of users mode (`{"m":"<prefix>-vault-users:1","kind":"users","entries":[{user,rounds,salt,iv,ct}]}`, the user name is authenticated data of his entry) and the key bundle (`Bundle` in
-`src/logic/vault.ts`, in IndexedDB store `vault`). Blobs: `{iv, ct}` (Uint8Array, structured clone) in the
-IndexedDB store `blobs`, each bound to `blob:<name>` as additional data (a slot name has no colon, so
-none collides). IndexedDB version 2 added `blobs`; version 1 databases are upgraded in place. No factory
+`src/logic/vault.ts`, in IndexedDB store `vault`). Blobs (since W4, 2026-11-22): in the IndexedDB store `blobs`, records `{iv, ct}` (Uint8Array, structured
+clone). A blob is a **head** under its name — `{v: 2, iv, ct}`, sealed JSON `{gen, count, size, chunk}` with
+additional data `blobhead:<name>` — and `count` **blocks** under the keys `~<name>#<gen>#<index>` (`gen` = 16 hex
+digits, new per write; the key starts with `~`, which no blob name may, so a block key is never a name and
+sorts after all names). Each block has its own IV and the additional data
+`blobchunk:<name>|<gen>|<index>|<count>`. Earlier one-piece blobs: `{iv, ct}` under the name, no `v`, additional
+data `blob:<name>` — still read, replaced by the new format on the next `putBytes`. (A slot name has no colon,
+so none collides.) IndexedDB version 2 added `blobs`; version 1 databases are upgraded in place. No factory
 defaults.
 
 ## Tests
@@ -78,7 +84,7 @@ defaults.
 ```bash
 npm install
 npm run typecheck
-npm test            # 120 tests on 2026-11-22 (logic 14, io 96, ui 10); io includes fake-indexeddb
+npm test            # 219 tests on 2026-11-22 (logic 19, io 190, ui 10); io includes fake-indexeddb
 npm run format:check
 npm run build
 ```
@@ -96,6 +102,22 @@ npm run build
   They are not held in memory and have no overwrite guard: a blob under an unopenable piece is replaced
   by a `putBytes` of the same name (the app owns its names). Slots still live in localStorage (about 5 MB
   and synchronous): large state belongs in blobs.
+- **Blobs in blocks (W4, 2026-11-22):** default block 2 MiB (`blobChunkSize`, 1 byte … 64 MiB, new writes only;
+  a stored blob keeps its own). Memory, besides the given bytes: `putBytes` about 3 blocks, `getBytes` the
+  result plus about 3 blocks — but the result is assembled whole, so a 300 MB file still needs 300 MB (use
+  `getBytesChunks` to take it block by block; it checks each block and throws at the first bad or missing
+  one, so the consumer must drop what it took before; it is not serialised with a write to the same name).
+  `putBytes` still needs the whole input as one `Uint8Array` (no streaming write: the block count is part of
+  the authenticated data and the head is written last). While writing, old and new content are in the storage
+  at once (up to 2× the blob). A write is atomic, an interrupted one (tab closed) leaves orphan blocks without
+  a head: invisible, swept by the next `putBytes`/`removeBytes` of that name or by "start anew", but until
+  then they take room. Calls on one name are serialised per vault instance, not across tabs (see "One tab
+  per app"). Each block is its own IndexedDB transaction on a freshly opened connection (about 100 for
+  200 MB): slower than one big put, not measured. Old one-piece blobs are listed by reading them whole
+  (`listBytesInfo`) until they are replaced. A rollback to an older complete state (old head + its blocks
+  put back) is not detected; the data key is the only authenticity anchor. New-format heads read as unopenable
+  in the code of before W4 (never silently wrong), and that code must not be mixed with this one on the same
+  database. Not tried in a real browser (iOS Safari quotas, memory of a phone).
 - **Users mode (2026-11-21):** tested in memory only; adding or changing a user unwraps the data key as
   extractable for a moment (the logged-in user's passphrase is asked again); the passphrase rules are the
   app's (the package only refuses under 6 characters); no limit of failed logins (the app or a server
@@ -106,7 +128,7 @@ npm run build
 - **Prefixes must not overlap (2026-11-22):** a prefix must not be the word-start of another prefix of the same site (`app` and `app-admin`): the guard only checks `<prefix>-`, so `app-admin-data` also belongs to `app` as far as the guard can tell, and a slot `admin-data` of `app` collides with the slot `data` of `app-admin`.
 - **PBKDF2 rounds (2026-11-22):** a stored entry or bundle with fewer than `minRounds` (default 100 000) or more than 3 000 000 rounds is refused as damaged. Entries made by an earlier version of this package with a custom lower count (tests) become unreadable unless the app sets `minRounds`; the standard 600 000 stays readable.
 - **User names (2026-11-22):** new names are stored NFC-normalised and compared normalised; an entry already stored under a non-NFC spelling keeps it (the name is authenticated data of the entry, so it cannot be rewritten) and is found by either spelling.
-- **Quota (2026-11-22):** a full storage reaches the app as `error.cause` of a rejected `putBytes` (`isQuotaError`); slot writes still report through `onError` as a text only. Large blobs are not chunked (open, W4).
+- **Quota (2026-11-22):** a full storage reaches the app as `error.cause` of a rejected `putBytes` (`isQuotaError`); slot writes still report through `onError` as a text only. Large blobs are cut into blocks (W4, closed 2026-11-22, see Blobs).
 - **Not consumed by any app from a Git tag yet**; not published to npm; no tag.
 - The prefix is part of the encrypted data: changing it makes old data unreadable.
 - The re-lock after 5 minutes (`LOCK_AFTER_MINUTES`) is fixed, not configurable.

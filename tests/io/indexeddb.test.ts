@@ -31,11 +31,11 @@ describe('blob store in IndexedDB', () => {
     await env.writeBlob('a', { iv: bytes(4), ct: bytes(5) });
     await env.writeBlob('a', { iv: bytes(6), ct: bytes(7) });
     expect(await env.readBlob('a')).toEqual({ iv: bytes(6), ct: bytes(7) });
-    expect(await env.listBlobs()).toEqual(['a', 'b']);
+    expect(await env.listBlobKeys()).toEqual(['a', 'b']);
     await env.removeBlob('a');
-    expect(await env.listBlobs()).toEqual(['b']);
+    expect(await env.listBlobKeys()).toEqual(['b']);
     await env.clearBlobs();
-    expect(await env.listBlobs()).toEqual([]);
+    expect(await env.listBlobKeys()).toEqual([]);
   });
 
   it('a stored value that is no piece reads as none (never a wrong shape)', async () => {
@@ -85,7 +85,7 @@ describe('upgrade from version 1', () => {
     });
     const env = browserEnvironment(prefix);
     expect(await env.readBundle()).toEqual({ m: 'old bundle' });
-    expect(await env.listBlobs()).toEqual([]);
+    expect(await env.listBlobKeys()).toEqual([]);
     await env.writeBlob('a', { iv: bytes(1), ct: bytes(2) });
     expect(await env.readBundle()).toEqual({ m: 'old bundle' });
   });

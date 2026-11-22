@@ -47,32 +47,32 @@ public entry `src/index.ts`. Behaviour is identical; the structural changes are:
 
 ## IO (`src/io/`)
 
-| Old (io/vault.ts)             | New                                                            | File                | Meaning                                                                          |
-| ----------------------------- | -------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------- |
-| `SLOTS`                       | `config.slots` (names without prefix)                          | `logic/config.ts`   | The slots that hold app data                                                     |
-| `VaultEnvironment`            | `VaultEnvironment`                                             | `io/environment.ts` | Where the pieces live; `read/write/remove` take the full name                    |
-| `browserEnvironment` (object) | `browserEnvironment(prefix, messages?)`                        | `io/environment.ts` | IndexedDB (keys) + localStorage (slots); database `<prefix>-vault`               |
-| `memoryEnvironment()`         | `memoryEnvironment()`                                          | `io/environment.ts` | In-memory environment for tests                                                  |
-| (new)                         | `guardEnvironment(prefix, env)`                                | `io/environment.ts` | Refuses store names outside `<prefix>-`                                          |
-| (new)                         | `VaultEnvironment.updateBundle(update)`, `BundleUpdate`        | `io/environment.ts` | Read and replace the key bundle in one step (one IndexedDB transaction)          |
-| (new)                         | `VaultEnvironment.listBlobInfo()`                              | `io/environment.ts` | Blob names with their stored length                                              |
-| (new)                         | `storageEstimate()`, `requestPersistence()`, `isQuotaError(e)` | `io/storage.ts`     | `navigator.storage` helpers (unknown/false without it); recognise a full storage |
-| (new)                         | `createVault(config, env?)`                                    | `io/vault.ts`       | Makes a vault instance                                                           |
-| `StartResult`                 | `StartResult`                                                  | `io/vault.ts`       | `open`, `locked` or `error`                                                      |
-| (new)                         | `Vault`                                                        | `io/vault.ts`       | The instance type                                                                |
-| `startVault(env)`             | `vault.startVault()`                                           | `io/vault.ts`       | Starts; the environment is given to `createVault`                                |
-| `unlock(password)`            | `vault.unlock(password)`                                       | `io/vault.ts`       | Unlock with the app lock on                                                      |
-| `isVaultOpen()`               | `vault.isVaultOpen()`                                          | `io/vault.ts`       |                                                                                  |
-| `isLockOn()`                  | `vault.isLockOn()`                                             | `io/vault.ts`       |                                                                                  |
-| `readSlot(name)`              | `vault.readSlot(slot)`                                         | `io/vault.ts`       | Slot name without prefix; unknown slot throws                                    |
-| `writeSlot(name, value)`      | `vault.writeSlot(slot, value)`                                 | `io/vault.ts`       | Returns the refusal reason or undefined                                          |
-| `saved()`                     | `vault.saved()`                                                | `io/vault.ts`       | Resolves when everything written is stored                                       |
-| `onError(listener)`           | `vault.onError(listener)`                                      | `io/vault.ts`       | Returns the unsubscribe function                                                 |
-| `lockNow()`                   | `vault.lockNow()`                                              | `io/vault.ts`       | Waits for the last write, then reloads                                           |
-| `startAnew()`                 | `vault.startAnew()`                                            | `io/vault.ts`       | Empty data under a new key                                                       |
-| `setLock(pw, current, n)`     | `vault.setLock(pw, current, rounds)`                           | `io/vault.ts`       | Lock on / new password                                                           |
-| `removeLock(current)`         | `vault.removeLock(current)`                                    | `io/vault.ts`       | Lock off                                                                         |
-| (new)                         | `vault.storageName(slot)`, `vault.config`, `vault.texts`       | `io/vault.ts`       | Store name of a slot, the config, the resolved texts                             |
+| Old (io/vault.ts)             | New                                                                                            | File                | Meaning                                                                                                                          |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `SLOTS`                       | `config.slots` (names without prefix)                                                          | `logic/config.ts`   | The slots that hold app data                                                                                                     |
+| `VaultEnvironment`            | `VaultEnvironment`                                                                             | `io/environment.ts` | Where the pieces live; `read/write/remove` take the full name                                                                    |
+| `browserEnvironment` (object) | `browserEnvironment(prefix, messages?)`                                                        | `io/environment.ts` | IndexedDB (keys) + localStorage (slots); database `<prefix>-vault`                                                               |
+| `memoryEnvironment()`         | `memoryEnvironment()`                                                                          | `io/environment.ts` | In-memory environment for tests                                                                                                  |
+| (new)                         | `guardEnvironment(prefix, env)`                                                                | `io/environment.ts` | Refuses store names outside `<prefix>-`                                                                                          |
+| (new)                         | `VaultEnvironment.updateBundle(update)`, `BundleUpdate`                                        | `io/environment.ts` | Read and replace the key bundle in one step (one IndexedDB transaction)                                                          |
+| (new)                         | `VaultEnvironment.listBlobHeads()`, `listBlobKeys(prefix?)`, `removeBlobs(keys)`, `StoredBlob` | `io/environment.ts` | Records of the blob store (heads / old pieces, any key, many removals); `listBlobInfo`/`listBlobs` of the first version are gone |
+| (new)                         | `storageEstimate()`, `requestPersistence()`, `isQuotaError(e)`                                 | `io/storage.ts`     | `navigator.storage` helpers (unknown/false without it); recognise a full storage                                                 |
+| (new)                         | `createVault(config, env?)`                                                                    | `io/vault.ts`       | Makes a vault instance                                                                                                           |
+| `StartResult`                 | `StartResult`                                                                                  | `io/vault.ts`       | `open`, `locked` or `error`                                                                                                      |
+| (new)                         | `Vault`                                                                                        | `io/vault.ts`       | The instance type                                                                                                                |
+| `startVault(env)`             | `vault.startVault()`                                                                           | `io/vault.ts`       | Starts; the environment is given to `createVault`                                                                                |
+| `unlock(password)`            | `vault.unlock(password)`                                                                       | `io/vault.ts`       | Unlock with the app lock on                                                                                                      |
+| `isVaultOpen()`               | `vault.isVaultOpen()`                                                                          | `io/vault.ts`       |                                                                                                                                  |
+| `isLockOn()`                  | `vault.isLockOn()`                                                                             | `io/vault.ts`       |                                                                                                                                  |
+| `readSlot(name)`              | `vault.readSlot(slot)`                                                                         | `io/vault.ts`       | Slot name without prefix; unknown slot throws                                                                                    |
+| `writeSlot(name, value)`      | `vault.writeSlot(slot, value)`                                                                 | `io/vault.ts`       | Returns the refusal reason or undefined                                                                                          |
+| `saved()`                     | `vault.saved()`                                                                                | `io/vault.ts`       | Resolves when everything written is stored                                                                                       |
+| `onError(listener)`           | `vault.onError(listener)`                                                                      | `io/vault.ts`       | Returns the unsubscribe function                                                                                                 |
+| `lockNow()`                   | `vault.lockNow()`                                                                              | `io/vault.ts`       | Waits for the last write, then reloads                                                                                           |
+| `startAnew()`                 | `vault.startAnew()`                                                                            | `io/vault.ts`       | Empty data under a new key                                                                                                       |
+| `setLock(pw, current, n)`     | `vault.setLock(pw, current, rounds)`                                                           | `io/vault.ts`       | Lock on / new password                                                                                                           |
+| `removeLock(current)`         | `vault.removeLock(current)`                                                                    | `io/vault.ts`       | Lock off                                                                                                                         |
+| (new)                         | `vault.storageName(slot)`, `vault.config`, `vault.texts`                                       | `io/vault.ts`       | Store name of a slot, the config, the resolved texts                                                                             |
 
 ## UI (`src/ui/`)
 
@@ -104,6 +104,10 @@ The German strings of the original now belong to the app (its `VAULT_TEXTS`). Fi
 - **Blobs:** `vault.putBytes/getBytes/removeBytes/listBytes/listBytesInfo` (`io/vault.ts`), `isBlobName`
   (`logic/config.ts`), and `readBlob/writeBlob/removeBlob/listBlobs/clearBlobs` on
   `VaultEnvironment` (`io/environment.ts`; IndexedDB store `blobs`, database version 2).
+- **Blobs in blocks (W4):** `vault.getBytesChunks(name)` (block-wise read), `VaultConfig.blobChunkSize`,
+  `DEFAULT_BLOB_CHUNK`, `MAX_BLOB_CHUNK`, `checkChunkSize` (`logic/blobs.ts`); environment methods
+  `readBlob/writeBlob/removeBlob/removeBlobs/listBlobKeys/listBlobHeads/clearBlobs` replace `listBlobs` and
+  `listBlobInfo`; `StoredBlob` = `{iv, ct, v?}`. Stored format: CLAUDE.md, section Data Model.
 - **Users mode:** `config.mode` (`'device'` default, `'users'`), `StartResult` kind `setup`, and
   on `Vault` `setupFirstUser`, `loginUser`, `currentUser`, `users`, `addUser`, `removeUser`,
   `changeUserPassphrase`, `userEntry`, `joinWithEntry`; crypto pieces `createUserEntry`,
